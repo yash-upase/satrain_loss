@@ -1,6 +1,13 @@
-# SatRain Models
+# satrain_loss — loss-function comparison on the SatRain benchmark
 
-A collection of ML model implementations for the SatRain dataset.
+A fork of [ipwgml/satrain_models](https://github.com/ipwgml/satrain_models) in
+which every PyTorch model is trained with a **selectable loss function** and the
+losses are compared across models under one fixed recipe. The study protocol,
+runner and leaderboard live in [`loss_study/`](loss_study/README.md); start with
+[`loss_study/WALKTHROUGH.md`](loss_study/WALKTHROUGH.md) if you are a contributor.
+
+The Python package keeps its upstream name `satrain_models` so that the code
+stays compatible with the reference repository.
 
 ## Overview
 
@@ -28,14 +35,32 @@ pip install -e .[dev]
 ```
 satrain_models/
 ├── satrain_models/          # Python package with PyTorch models and utilities
-└── models/                  # Model implementations
-    ├── model_name_1/        # Each model in its own folder
-    │   ├── requirements.txt # Conda-compatible requirements
-    │   └── ...              # Model-specific files
-    └── model_name_2/
-        ├── requirements.txt
-        └── ...
+│   ├── losses.py            # Loss registry (mse, mae, huber, logcosh, weighted_mse, tweedie, quantile, ...)
+│   └── cli.py               # Shared --loss / --devices handling for train.py / test.py
+├── models/                  # Model implementations
+│   ├── model_name_1/        # Each model in its own folder
+│   │   ├── requirements.txt # Conda-compatible requirements
+│   │   └── ...              # Model-specific files
+│   └── model_name_2/
+│       ├── requirements.txt
+│       └── ...
+└── loss_study/              # Loss-function intercomparison: fixed configs, runner, aggregation
 ```
+
+## Loss-function comparison study
+
+The PyTorch models can be trained with any registered loss:
+
+```bash
+cd models/encoder_decoder
+python train.py model_unet_medium.toml --loss huber --loss-arg delta=0.5
+python test.py models/<experiment>.pt          # loss is read from the model file
+```
+
+The experiment name and all result files record the loss. `loss_study/`
+contains the protocol and tooling for the team study in which every model is
+trained with every loss under one fixed recipe — see `loss_study/README.md`,
+and `CONTRIBUTING.md` for adding a loss.
 
 ## Adding a Model
 

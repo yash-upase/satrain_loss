@@ -1,0 +1,5 @@
+name = "logcosh"
+task = "regression"
+description = "Log-cosh loss: smooth approximation of MAE that behaves like MSE near zero."
+
+[args]

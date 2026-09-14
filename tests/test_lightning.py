@@ -168,3 +168,59 @@ def test_lightning_module_tabular(
         track=False,
     )
     assert np.any(np.isfinite(results.surface_precip.data))
+
+
+@pytest.mark.parametrize("loss_name", ["quantile", "tweedie", "hybrid"])
+def test_lightning_module_multi_output_losses(
+    satrain_config_spatial, cpu_compute_config, satrain_test_data, loss_name
+):
+    """
+    Losses that change the number of model outputs or apply a link function
+    train and evaluate through the same path as MSE.
+    """
+    from satrain_models import get_loss
+
+    loss = get_loss(loss_name)
+    data_module = SatRainDataModule(
+        satrain_config_spatial,
+        batch_size=1,
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False,
+    )
+    data_module.setup()
+
+    model = SatRainEstimationModule(
+        create_unet(13, loss.n_outputs, True),
+        loss=loss,
+        approach=cpu_compute_config.approach,
+    )
+    assert loss_name in model.experiment_name
+
+    trainer = L.Trainer(
+        max_epochs=1,
+        limit_train_batches=2,
+        limit_val_batches=2,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+    )
+    trainer.fit(model, data_module)
+    assert np.isfinite(trainer.callback_metrics["val/loss"].item())
+    assert "val/mse" in trainer.callback_metrics
+
+    evaluator = data_module.get_evaluator("korea")
+    retrieval_fn = model.get_retrieval_fn(satrain_config_spatial, cpu_compute_config)
+    results = evaluator.evaluate_scene(
+        0,
+        tile_size=(64, 64),
+        batch_size=1,
+        overlap=8,
+        retrieval_fn=retrieval_fn,
+        input_data_format="spatial",
+        track=False,
+    )
+    assert np.any(np.isfinite(results.surface_precip.data))
+    if loss.task == "hybrid":
+        assert "probability_of_precip" in results

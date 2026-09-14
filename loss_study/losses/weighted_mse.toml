@@ -1,0 +1,8 @@
+name = "weighted_mse"
+task = "regression"
+description = "MSE with per-pixel weights 1 + alpha * rain_rate ('linear') or 1 + alpha * (rain_rate > threshold) ('step')."
+
+[args]
+alpha = 1.0
+threshold = 0.1
+mode = "linear"

@@ -28,6 +28,7 @@ from torch.optim.lr_scheduler import (
 )
 from torchmetrics import MeanAbsoluteError, MeanSquaredError
 
+from satrain_models.losses import Loss, resolve_loss
 from satrain_models.metrics import CorrelationCoef, PlotSamples, RelativeBias
 
 # Import for type hints
@@ -84,7 +85,7 @@ class SatRainEstimationModule(L.LightningModule):
     def __init__(
         self,
         model: nn.Module,
-        loss: nn.Module = nn.MSELoss(),
+        loss: Union[Loss, nn.Module, str, None] = "mse",
         approach: str = "adamw_warmup_cosine_annealing",
         learning_rate: Optional[float] = None,
         name: Optional[str] = None,
@@ -92,7 +93,10 @@ class SatRainEstimationModule(L.LightningModule):
         """
         Args:
             model: A PyTorch model implementing the model to train.
-            loss: A loss module defining the loss used to train the model.
+            loss: The loss used to train the model. Either a
+                ``satrain_models.losses.Loss``, a registered loss name (e.g.
+                ``"huber"``), a path to a loss TOML file, or any plain
+                ``nn.Module`` loss (wrapped automatically). Defaults to MSE.
             approach: A string specifying the training approach.
             learning_rate: The initial learning rate to use.
             name: Optional name to use to prefix the experiment name with.
@@ -101,7 +105,7 @@ class SatRainEstimationModule(L.LightningModule):
         self.save_hyperparameters(ignore=["model", "loss"])  # keeps logs tidy
 
         self.model = model
-        self.criterion = loss
+        self.criterion: Loss = resolve_loss(loss)
 
         if approach not in APPROACHES:
             raise ValueError(f"Unknown approach '{approach}'. Choose from {APPROACHES}.")
@@ -118,42 +122,93 @@ class SatRainEstimationModule(L.LightningModule):
 
     @property
     def experiment_name(self):
+        """
+        Unique experiment name ``<name>_<loss>_<approach>_vNN``. The version is
+        chosen on first access so that it doesn't exist in ``checkpoints/`` and
+        is then fixed for the lifetime of the module.
+        """
+        cached = getattr(self, "_experiment_name", None)
+        if cached is not None:
+            return cached
         version = 0
         while True:
-            if self.name is None:
-                name = f"{self.approach}_v{version:02}"
-            else:
-                name = f"{self.name}_{self.approach}_v{version:02}"
+            parts = [] if self.name is None else [self.name]
+            parts += [self.criterion.name, self.approach, f"v{version:02}"]
+            name = "_".join(parts)
             if not (Path("checkpoints") / (name + ".ckpt")).exists():
                 break
             version += 1
+        self._experiment_name = name
         return name
 
+    @experiment_name.setter
+    def experiment_name(self, value: str):
+        self._experiment_name = value
+
+    @property
+    def loss_name(self) -> str:
+        """Name of the loss the module is trained with."""
+        return self.criterion.name
+
+    def loss_config(self) -> Dict[str, Any]:
+        """Serializable description of the loss (see ``Loss.config``)."""
+        return self.criterion.config()
+
+    @staticmethod
+    def _split_batch(batch: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Extract stacked input tensor and surface-precip target from a batch."""
+        inputs, targets = batch
+        # Handle input data (can be stacked tensor or dict)
+        if isinstance(inputs, dict):
+            x = torch.cat(list(inputs.values()), dim=1)
+        else:
+            x = inputs
+        # Extract target (surface precipitation)
+        if isinstance(targets, dict):
+            y = targets["surface_precip"]
+        else:
+            y = targets
+        return x, y.float()
+
     def _compute_finite_loss(self, pred: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute loss only over finite values (no NaN or inf).
+        """Compute loss only over finite target values (no NaN or inf).
+
+        Works for spatial ``(B, C, H, W)`` and tabular ``(B, C)`` predictions
+        with targets of shape ``(B, H, W)`` / ``(B,)`` (a singleton channel
+        dimension on the target is tolerated). The prediction channels are
+        gathered channel-last so multi-output losses receive ``(N, C)``.
 
         Args:
             pred: Predictions tensor
-            y: Target tensor
+            y: Target tensor (already transformed by the loss)
 
         Returns:
             Loss computed only over finite values, or zero if no finite values exist
         """
-        if y.ndim < pred.ndim:
-            y = y.unsqueeze(1)
+        if y.ndim == pred.ndim:
+            y = y.select(1, 0)
 
-        # Create mask for finite values in both prediction and target
-        mask = torch.isfinite(pred) & torch.isfinite(y)
-
+        mask = torch.isfinite(y)
         # If no finite values, return zero loss (prevents NaN gradients)
         if not mask.any():
-            return torch.tensor(0.0, device=y.device, requires_grad=True)
+            return (pred * 0.0).sum()
 
-        # Compute loss only over finite values
-        pred_masked = pred[mask]
-        y_masked = y[mask]
+        pred_masked = pred.movedim(1, -1)[mask]  # (N, C)
+        if pred_masked.shape[-1] == 1:
+            pred_masked = pred_masked[:, 0]
+        return self.criterion(pred_masked, y[mask])
 
-        return self.criterion(pred_masked, y_masked)
+    def _point_estimate(self, pred: torch.Tensor) -> torch.Tensor:
+        """
+        Reduce raw model output to the single channel used for validation
+        metrics: the rain rate for regression / hybrid losses, the logit for
+        detection losses. Returns shape ``(B, ...)`` without channel dimension.
+        """
+        outputs = self.criterion.predict(pred)
+        for key in ("surface_precip", "probability_of_precip", "probability_of_heavy_precip"):
+            if key in outputs:
+                return outputs[key].select(1, 0)
+        return next(iter(outputs.values())).select(1, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
@@ -169,29 +224,10 @@ class SatRainEstimationModule(L.LightningModule):
         Returns:
             A torch.Tensor containing the loss.
         """
-        inputs, targets = batch
-
-        # Handle input data (can be stacked tensor or dict)
-        if isinstance(inputs, dict):
-            # If not stacked, concatenate input channels
-            x = torch.cat(list(inputs.values()), dim=1)
-        else:
-            x = inputs
-
-        # Extract target (surface precipitation)
-        if isinstance(targets, dict):
-            y = targets["surface_precip"]
-        else:
-            y = targets
-
-        # Ensure target is float32 and has the right shape
-        y = y.float()
+        x, y = self._split_batch(batch)
+        y = self.criterion.transform_target(y)
 
         pred = self(x)
-
-        # Squeeze output to match target shape if needed
-        if pred.dim() == 4 and pred.size(1) == 1:
-            pred = pred.squeeze(1)
 
         # Calculate loss only over finite values
         loss = self._compute_finite_loss(pred, y)
@@ -221,29 +257,10 @@ class SatRainEstimationModule(L.LightningModule):
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         """Validation step with comprehensive metrics computation."""
-        inputs, targets = batch
-
-        # Handle input data (can be stacked tensor or dict)
-        if isinstance(inputs, dict):
-            # If not stacked, concatenate input channels
-            x = torch.cat(list(inputs.values()), dim=1)
-        else:
-            x = inputs
-
-        # Extract target (surface precipitation)
-        if isinstance(targets, dict):
-            y = targets["surface_precip"]
-        else:
-            y = targets
-
-        # Ensure target is float32 and has the right shape
-        y = y.float()
+        x, y = self._split_batch(batch)
+        y = self.criterion.transform_target(y)
 
         pred = self(x)
-
-        # Squeeze output to match target shape if needed
-        if pred.dim() == 4 and pred.size(1) == 1:
-            pred = pred.squeeze(1)
 
         # Compute main loss only over finite values
         loss = self._compute_finite_loss(pred, y)
@@ -258,13 +275,16 @@ class SatRainEstimationModule(L.LightningModule):
             batch_size=x.size(0),
         )
 
-        # Compute and log validation metrics
-        # Flatten tensors for metric computation
-        y_flat = y.view(-1)
-        pred_flat = pred.view(-1)
+        # Validation metrics are computed on the loss' point estimate so they
+        # are comparable across losses (e.g. quantile median, Tweedie mean).
+        point = self._point_estimate(pred)
+        if y.ndim == point.ndim + 1:
+            y = y.select(1, 0)
+        y_flat = y.reshape(-1)
+        pred_flat = point.reshape(-1)
 
         # Remove NaN/inf values for metric computation (only use finite values)
-        mask = torch.isfinite(y_flat) * torch.isfinite(pred_flat)
+        mask = torch.isfinite(y_flat) & torch.isfinite(pred_flat)
         if mask.sum() > 0:
             y_clean = y_flat[mask]
             pred_clean = pred_flat[mask]
@@ -276,8 +296,8 @@ class SatRainEstimationModule(L.LightningModule):
             self.val_corrcoef.update(pred_clean, y_clean)
 
         # Only works for spatial format
-        if pred.ndim == 4:
-            self.plot_samples.update(pred, y)
+        if point.ndim == 3:
+            self.plot_samples.update(point.unsqueeze(1), y.unsqueeze(1))
 
         return loss
 
@@ -292,6 +312,13 @@ class SatRainEstimationModule(L.LightningModule):
         self.val_corrcoef.reset()
         self.plot_samples.log(self)
         self.plot_samples.reset()
+
+    def _steps(self, fraction: float) -> int:
+        """
+        Number of optimizer steps corresponding to ``fraction`` of the training
+        run (at least 1, so tiny smoke-test runs don't break the schedulers).
+        """
+        return max(1, int(fraction * self.trainer.estimated_stepping_batches))
 
     def configure_optimizers(
         self,
@@ -452,14 +479,14 @@ class SatRainEstimationModule(L.LightningModule):
                     LinearLR(
                         optimizer,
                         start_factor=0.1,
-                        total_iters=int(0.1 * self.trainer.estimated_stepping_batches),
+                        total_iters=self._steps(0.1),
                     ),
                     CosineAnnealingLR(
                         optimizer,
-                        T_max=int(0.9 * self.trainer.estimated_stepping_batches),
+                        T_max=self._steps(0.9),
                     ),
                 ],
-                milestones=[0.1 * self.trainer.estimated_stepping_batches],
+                milestones=[self._steps(0.1)],
             )
             scheduler_conf = {
                 "scheduler": scheduler,
@@ -478,14 +505,14 @@ class SatRainEstimationModule(L.LightningModule):
                     LinearLR(
                         optimizer,
                         start_factor=0.1,
-                        total_iters=int(0.1 * self.trainer.estimated_stepping_batches),
+                        total_iters=self._steps(0.1),
                     ),
                     CosineAnnealingLR(
                         optimizer,
-                        T_max=int(0.9 * self.trainer.estimated_stepping_batches),
+                        T_max=self._steps(0.9),
                     ),
                 ],
-                milestones=[0.1 * self.trainer.estimated_stepping_batches],
+                milestones=[self._steps(0.1)],
             )
             scheduler_conf = {
                 "scheduler": scheduler,
@@ -509,15 +536,15 @@ class SatRainEstimationModule(L.LightningModule):
                     LinearLR(
                         optimizer,
                         start_factor=0.1,
-                        total_iters=int(0.1 * self.trainer.estimated_stepping_batches),
+                        total_iters=self._steps(0.1),
                     ),
                     CosineAnnealingWarmRestarts(
                         optimizer,
-                        T_0=int(0.13 * self.trainer.estimated_stepping_batches),
+                        T_0=self._steps(0.13),
                         T_mult=2,
                     ),
                 ],
-                milestones=[0.1 * self.trainer.estimated_stepping_batches],
+                milestones=[self._steps(0.1)],
             )
             scheduler_conf = {
                 "scheduler": scheduler,
@@ -539,15 +566,15 @@ class SatRainEstimationModule(L.LightningModule):
                     LinearLR(
                         optimizer,
                         start_factor=0.1,
-                        total_iters=int(0.1 * self.trainer.estimated_stepping_batches),
+                        total_iters=self._steps(0.1),
                     ),
                     CosineAnnealingWarmRestarts(
                         optimizer,
-                        T_0=int(0.13 * self.trainer.estimated_stepping_batches),
+                        T_0=self._steps(0.13),
                         T_mult=2,
                     ),
                 ],
-                milestones=[0.1 * self.trainer.estimated_stepping_batches],
+                milestones=[self._steps(0.1)],
             )
             scheduler_conf = {
                 "scheduler": scheduler,
@@ -567,7 +594,7 @@ class SatRainEstimationModule(L.LightningModule):
             )
             scheduler = CosineAnnealingWarmRestarts(
                 optimizer,
-                T_0=int(0.15 * self.trainer.estimated_stepping_batches),
+                T_0=self._steps(0.15),
                 T_mult=2,
             )
             scheduler_conf = {
@@ -586,7 +613,7 @@ class SatRainEstimationModule(L.LightningModule):
             )
             scheduler = CosineAnnealingWarmRestarts(
                 optimizer,
-                T_0=int(0.15 * self.trainer.estimated_stepping_batches),
+                T_0=self._steps(0.15),
                 T_mult=2,
             )
             scheduler_conf = {
@@ -674,7 +701,15 @@ class SatRainEstimationModule(L.LightningModule):
             with torch.no_grad():
                 pred = self.model(inpt)
                 if isinstance(pred, torch.Tensor):
-                    pred = {"surface_precip": pred}
+                    # Let the loss turn raw channels into named outputs
+                    # (e.g. quantile median, Tweedie link, detection logits).
+                    if feature_dim == 0:
+                        pred = {
+                            key: val[0]
+                            for key, val in self.criterion.predict(pred[None]).items()
+                        }
+                    else:
+                        pred = self.criterion.predict(pred)
 
                 results = xr.Dataset()
                 if "surface_precip" in pred:
@@ -688,14 +723,14 @@ class SatRainEstimationModule(L.LightningModule):
                     )
                 if "probability_of_precip" in pred:
                     pop = pred["probability_of_precip"].select(feature_dim, 0)
-                    pop = torch.sigmoid(pop).cpu().numpy()
+                    pop = torch.sigmoid(pop).float().cpu().numpy()
                     results["probability_of_precip"] = (dims, pop)
                     precip_flag = self.precip_threshold <= pop
                     results["precip_flag"] = (dims, precip_flag)
 
                 if "probability_of_heavy_precip" in pred:
                     pohp = pred["probability_of_heavy_precip"].select(feature_dim, 0)
-                    pohp = torch.sigmoid(pohp).cpu().numpy()
+                    pohp = torch.sigmoid(pohp).float().cpu().numpy()
                     results["probability_of_heavy_precip"] = (dims, pohp)
                     heavy_precip_flag = self.heavy_precip_threshold <= pohp
                     results["heavy_precip_flag"] = (dims, heavy_precip_flag)
@@ -704,7 +739,16 @@ class SatRainEstimationModule(L.LightningModule):
 
         return retrieval_fn
 
-    def save(self, satrain_config: "SatRainConfig", output_path: Path) -> None:
+    #: Probability thresholds used to derive flags from detection outputs.
+    precip_threshold: float = 0.5
+    heavy_precip_threshold: float = 0.5
+
+    def save(
+        self,
+        satrain_config: "SatRainConfig",
+        output_path: Path,
+        model_config: Optional[Dict[str, Any]] = None,
+    ) -> Path:
         """
         Save model and configuration to path. The file name is determined using
         the experiment name of the lightning module.
@@ -712,6 +756,10 @@ class SatRainEstimationModule(L.LightningModule):
         Args:
             satrain_config: The SatRain config the model was trained with.
             output_path: The path in in which to save the model.
+            model_config: Optional dictionary describing the model architecture.
+
+        Returns:
+            The path of the saved file.
         """
         if not output_path.exists() or not output_path.is_dir():
             raise ValueError(
@@ -720,9 +768,15 @@ class SatRainEstimationModule(L.LightningModule):
             )
         path = output_path / f"{self.experiment_name}.pt"
         state = self.model.state_dict()
-        torch.save(
-            {"state_dict": state, "satrain_config": satrain_config.to_dict()}, path
-        )
+        payload = {
+            "state_dict": state,
+            "satrain_config": satrain_config.to_dict(),
+            "loss_config": self.loss_config(),
+        }
+        if model_config is not None:
+            payload["model_config"] = model_config
+        torch.save(payload, path)
+        return path
 
 
 class SatRainDetectionModule(SatRainEstimationModule):

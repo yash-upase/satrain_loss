@@ -2,6 +2,7 @@
 
 from .config import ComputeConfig, SatRainConfig
 from .datamodule import SatRainDataModule
+from .losses import LOSSES, Loss, get_loss, load_loss_toml, register_loss, resolve_loss
 from .lightning import SatRainEstimationModule, SatRainDetectionModule
 from .random_forest import RandomForestRetrieval, create_random_forest_retrieval
 from .resnet import ResNet, create_resnet, ResNetConfig, create_resnet_from_config  # veljko
@@ -40,6 +41,12 @@ __all__ = [
     "SatRainEstimationModule",
     "SatRainDetectionModule",
     "SatRainDataModule",
+    "Loss",
+    "LOSSES",
+    "get_loss",
+    "register_loss",
+    "resolve_loss",
+    "load_loss_toml",
     "extract_scalars_from_tensorboard",
     "scalars_to_netcdf",
     "tensorboard_to_netcdf",

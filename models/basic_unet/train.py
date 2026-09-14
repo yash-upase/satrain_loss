@@ -1,55 +1,55 @@
 #!/usr/bin/env python3
 """
-Clean PyTorch Lightning training script for UNet model on SatRain dataset.
-All configuration is read from TOML files.
+PyTorch Lightning training script for the basic UNet model on the SatRain dataset.
+All configuration is read from TOML files; the loss can be selected with --loss.
 """
 
 import argparse
 import logging
-from pathlib import Path
 
 import lightning as L
-import torch.nn as nn
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from satrain_models import (
-    ComputeConfig,
-    SatRainConfig,
     SatRainDataModule,
     SatRainEstimationModule,
     create_unet,
-    tensorboard_to_netcdf,
+)
+from satrain_models.cli import (
+    add_common_args,
+    load_compute_config,
+    load_dataset_config,
+    resolve_loss_from_args,
+    save_training_artifacts,
 )
 
 LOGGER = logging.getLogger("basic_unet_training")
+
+MODEL_FAMILY = "unet"
+BILINEAR = True
 
 
 def main():
     """Training function"""
 
     parser = argparse.ArgumentParser(description="Train basic UNet model")
+    # Positional compute config kept for backwards compatibility with
+    # ``python train.py compute_adamw.toml``; ``--compute-config`` also works.
     parser.add_argument(
-        "compute_config", help="Path to compute config file.", default="compute.toml"
+        "compute_config_positional",
+        nargs="?",
+        metavar="compute_config",
+        help="Path to compute config file (default: compute.toml).",
+        default=None,
     )
-    parser.add_argument(
-        "--dataset-config", help="Path to dataset config file.", default="dataset.toml"
-    )
+    add_common_args(parser)
     args = parser.parse_args()
+    if args.compute_config_positional is not None:
+        args.compute_config = args.compute_config_positional
 
-    # Load dataset configuration
-    dataset_config_path = Path(args.dataset_config)
-    if not dataset_config_path.exists():
-        raise FileNotFoundError(f"Dataset config not found: {dataset_config_path}")
-    config = SatRainConfig.from_toml_file(dataset_config_path)
-    LOGGER.info(f"Loaded SatRain config from: {dataset_config_path}")
-
-    # Load compute configuration
-    compute_config_path = Path(args.compute_config)
-    if not compute_config_path.exists():
-        raise FileNotFoundError(f"Compute config not found: {compute_config_path}")
-    compute_config = ComputeConfig.from_toml_file(compute_config_path)
-    LOGGER.info(f"Loaded compute config from: {compute_config_path}")
+    config = load_dataset_config(args)
+    compute_config = load_compute_config(args)
+    loss = resolve_loss_from_args(args, compute_config)
 
     # Create data module
     datamodule = SatRainDataModule(
@@ -60,17 +60,19 @@ def main():
         persistent_workers=compute_config.persistent_workers,
     )
 
-    # Create model
+    # Create model; the loss dictates the number of output channels.
     unet_model = create_unet(
-        n_channels=datamodule.num_features, n_outputs=1, bilinear=True
+        n_channels=datamodule.num_features, n_outputs=loss.n_outputs, bilinear=BILINEAR
     )
+    model_config = {"bilinear": BILINEAR, "n_outputs": loss.n_outputs}
 
     # Create Lightning module with dataset-aware naming
-    experiment_prefix = config.get_experiment_name_prefix("unet")
+    experiment_prefix = config.get_experiment_name_prefix(MODEL_FAMILY)
     lightning_module = SatRainEstimationModule(
         model=unet_model,
-        loss=nn.MSELoss(),
+        loss=loss,
         approach=compute_config.approach,
+        learning_rate=compute_config.learning_rate,
         name=experiment_prefix,
     )
     experiment_name = lightning_module.experiment_name
@@ -89,33 +91,27 @@ def main():
         log_every_n_steps=compute_config.log_every_n_steps,
         check_val_every_n_epoch=compute_config.check_val_every_n_epoch,
         accumulate_grad_batches=compute_config.accumulate_grad_batches,
+        **compute_config.trainer_overrides(),
     )
 
     # Train the model
-    LOGGER.info(f"Starting the training: {compute_config_path}")
+    LOGGER.info(f"Starting the training: {experiment_name}")
     trainer.fit(lightning_module, datamodule)
 
-    # Extract and save training metrics
-    LOGGER.info(f"Training finished. Saving metrics.")
-    current_log_dir = loggers[0].log_dir
-    netcdf_dir = Path("netcdf_metrics")
-    netcdf_dir.mkdir(exist_ok=True)
-    log_path = Path(current_log_dir)
-    version_name = log_path.name
-    metadata = {
-        "experiment": experiment_prefix,
-        "version": version_name,
-        "approach": compute_config.approach,
-    }
-    output_path = netcdf_dir / (experiment_name + ".nc")
-    tensorboard_to_netcdf(
-        log_dir=current_log_dir, output_path=output_path, metadata=metadata
+    # Save training metrics and model weights
+    LOGGER.info("Training finished. Saving metrics.")
+    save_training_artifacts(
+        lightning_module,
+        loggers[0].log_dir,
+        config,
+        compute_config,
+        MODEL_FAMILY,
+        model_config=model_config,
+        model_name="basic_unet",
+        study=args.study,
+        num_parameters=unet_model.num_parameters,
+        num_trainable_parameters=unet_model.num_trainable_parameters,
     )
-
-    # Save model with dataset config
-    output_path = Path("models")
-    output_path.mkdir(exist_ok=True)
-    lightning_module.save(config, output_path)
 
 
 if __name__ == "__main__":

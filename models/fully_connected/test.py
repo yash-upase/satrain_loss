@@ -1,92 +1,53 @@
 #!/usr/bin/env python3
 """
-Clean PyTorch Lightning training script for Fully-connected model on SatRain dataset.
-All configuration is read from TOML files.
+Evaluation script for the fully-connected (MLP) model on the SatRain test
+domains (tabular input). The dataset, model and loss configuration are read
+from the saved model file.
 """
 import argparse
 import logging
 from pathlib import Path
 
-import torch
-import torch.nn as nn
-import lightning as L
-from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-import xarray as xr
-
 from satrain_models import (
-    SatRainEstimationModule, ComputeConfig, create_fully_connected, SatRainConfig, SatRainDataModule,
-    tensorboard_to_netcdf, FullyConnectedConfig
+    SatRainEstimationModule, create_fully_connected, SatRainDataModule,
+    FullyConnectedConfig, get_loss,
+)
+from satrain_models.cli import (
+    add_common_args,
+    load_compute_config,
+    load_satrain_config_for_test,
+    load_saved_model,
+    result_attrs,
+    run_evaluation,
+    save_test_results,
 )
 
 
 LOGGER = logging.getLogger(__name__)
 
-parser = argparse.ArgumentParser()
-parser.add_argument("model", help="Path to model weight or checkpoint file.")
-args = parser.parse_args()
+MODEL_FAMILY = "fully_connected"
 
 
 def main():
-    """Main training function - all configuration from TOML files."""
+    """Evaluate a trained model on all test domains."""
+    parser = argparse.ArgumentParser(description="Test FullyConnected model")
+    parser.add_argument("model", help="Path to model weight or checkpoint file.")
+    add_common_args(parser, testing=True)
+    args = parser.parse_args()
 
-
-    # Load weights and SatRain config
     model_path = Path(args.model)
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"Provided model path '{model_path}' doesn't exist."
-        )
-        return 1
+    saved = load_saved_model(model_path)
+    satrain_config = load_satrain_config_for_test(saved)
+    loss = get_loss(**saved["loss_config"])
+    LOGGER.info(f"Loaded model file {model_path} (loss: {loss.name})")
 
-
-    # Load checkpoint/state_dict (accept multiple formats)
-    loaded = torch.load(model_path, map_location=torch.device("cpu"), weights_only=False)
-
-    # If checkpoint is a dict containing 'state_dict' (Lightning style), use it.
-    if isinstance(loaded, dict) and "state_dict" in loaded:
-        state = loaded["state_dict"]
-        satrain_cfg = loaded.get("satrain_config", None)
-        model_cfg = loaded.get("model_config", None)
+    if saved["model_config"] is not None:
+        model_config = FullyConnectedConfig(**saved["model_config"])
     else:
-        # Assume loaded is a bare state_dict
-        state = loaded
-        satrain_cfg = None
-        model_cfg = None
-
-    # Remove common 'model.' or 'model_' prefixes from Lightning checkpoints
-    if isinstance(state, dict) and any(k.startswith("model.") or k.startswith("model_") for k in state.keys()):
-        state = {
-            (k.split(".", 1)[1] if k.startswith("model.") else (k.split("_", 1)[1] if k.startswith("model_") else k)): v
-            for k, v in state.items()
-        }
-
-    # Build SatRainConfig: prefer checkpoint's config, otherwise fallback to local dataset.toml
-    if satrain_cfg is not None:
-        satrain_config = SatRainConfig(**satrain_cfg)
-    else:
-        dataset_config_path = Path("dataset.toml")
-        if not dataset_config_path.exists():
-            raise FileNotFoundError(
-                "Checkpoint has no 'satrain_config' and dataset.toml not found in working directory."
-            )
-        satrain_config = SatRainConfig.from_toml_file(dataset_config_path)
-        LOGGER.info("Loaded SatRain config from dataset.toml (fallback)")
-
-    # Build FullyConnectedConfig: prefer checkpoint's config, otherwise use default
-    if model_cfg is not None:
-        model_config = FullyConnectedConfig(**model_cfg)
-    else:
-        # Use default config if not found in checkpoint
         model_config = FullyConnectedConfig()
-        LOGGER.info("Using default FullyConnected config (checkpoint has no 'model_config')")
+        LOGGER.info("Using default FullyConnected config (model file has no 'model_config')")
 
-    # Load compute configuration
-    compute_config_path = Path("compute.toml")
-    if not compute_config_path.exists():
-        raise FileNotFoundError(f"Compute config not found: {compute_config_path}")
-    compute_config = ComputeConfig.from_toml_file(compute_config_path)
-    LOGGER.info(f"Loaded compute config from: {compute_config_path}")
+    compute_config = load_compute_config(args)
 
     # Create data module
     data_module = SatRainDataModule(
@@ -101,42 +62,41 @@ def main():
     fully_connected_model = create_fully_connected(
         input_dim=satrain_config.num_features,
         hidden_dims=model_config.hidden_dims,
+        output_dim=loss.n_outputs,
         dropout=model_config.dropout
     )
-    fully_connected_model.load_state_dict(state)
+    fully_connected_model.load_state_dict(saved["state_dict"])
 
-    # Create experiment name that includes dataset and model configuration
-    dataset_prefix = satrain_config.get_experiment_name_prefix("fully_connected")
-    full_experiment_name = f"{dataset_prefix}_{model_config.model_name}"
-    
     # Create Lightning module
     lightning_module = SatRainEstimationModule(
         model=fully_connected_model,
-        loss=nn.MSELoss(),
+        loss=loss,
         approach=compute_config.approach,
-        name=full_experiment_name,
     )
-    experiment_name = lightning_module.experiment_name
+    experiment_name = model_path.stem
 
+    results = run_evaluation(
+        lightning_module,
+        data_module,
+        satrain_config,
+        compute_config,
+        input_data_format="tabular",
+    )
 
-    results = []
-    domains = ["austria", "conus", "korea"]
-    for domain in domains:
-        LOGGER.info("Running evaluation for domain '%s'.", domain)
-        evaluator = data_module.get_evaluator(domain)
-        evaluator.evaluate(
-            lightning_module.get_retrieval_fn(satrain_config, compute_config),
-            batch_size=compute_config.batch_size,
-            input_data_format="tabular",
-        )
-        results.append(evaluator.get_results())
-
-    results = xr.concat(results, dim="domain")
-    results["domain"] = domains
-
-    output_path = Path(".") / "test_results"
-    output_path.mkdir(exist_ok=True)
-    results.to_netcdf(output_path / f"{experiment_name}.nc")
+    attrs = result_attrs(
+        satrain_config,
+        compute_config,
+        loss,
+        experiment_name,
+        MODEL_FAMILY,
+        model_name=model_config.model_name,
+        study=args.study,
+        hidden_dims=str(model_config.hidden_dims),
+        dropout=model_config.dropout,
+        num_parameters=sum(p.numel() for p in fully_connected_model.parameters()),
+        num_trainable_parameters=sum(p.numel() for p in fully_connected_model.parameters() if p.requires_grad),
+    )
+    save_test_results(results, experiment_name, attrs)
 
 
 if __name__ == '__main__':

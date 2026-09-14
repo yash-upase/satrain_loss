@@ -1,0 +1,6 @@
+# Baseline: mean squared error.
+name = "mse"
+task = "regression"
+description = "Mean squared error; the baseline every other loss is compared against."
+
+[args]

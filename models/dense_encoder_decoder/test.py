@@ -1,55 +1,59 @@
 #!/usr/bin/env python3
 """
-Clean PyTorch Lightning testing script for DenseEncoderDecoder model on SatRain dataset.
-All configuration is read from TOML files and saved model.
+Evaluation script for the DenseEncoderDecoder (UNet++) model on the SatRain
+test domains. The dataset, model and loss configuration are read from the
+saved model file.
 """
 import argparse
 import logging
 from pathlib import Path
 
-import lightning as L
-import torch
-import torch.nn as nn
-import xarray as xr
-
-from satrain_models import (
-    ComputeConfig,
-    SatRainConfig,
-    SatRainDataModule,
-    SatRainEstimationModule,
+from satrain_models import SatRainDataModule, SatRainEstimationModule, get_loss
+from satrain_models.cli import (
+    add_common_args,
+    load_compute_config,
+    load_satrain_config_for_test,
+    load_saved_model,
+    result_attrs,
+    run_evaluation,
+    save_test_results,
 )
 from satrain_models.encoder_decoder import (
-    DenseEncoderDecoderConfig,
+    EncoderDecoderConfig,
     Conv2dBnReLU,
     Conv2dLnGELU,
     Conv2dLnReLU,
     ResNeXtBlock,
+    InvertedBottleneck,
 )
+from satrain_models.unetpp import DenseEncoderDecoder
 
 LOGGER = logging.getLogger(__name__)
 
+MODEL_FAMILY = "dense_encoder_decoder"
+
 # Available block classes mapping
-BLOCK_CLASSES = {
+BLOCK_FACTORIES = {
     "Conv2dBnReLU": Conv2dBnReLU,
     "Conv2dLnGELU": Conv2dLnGELU,
     "Conv2dLnReLU": Conv2dLnReLU,
     "ResNeXtBlock": ResNeXtBlock,
+    "InvertedBottleneck": InvertedBottleneck,
 }
 
 
 def create_encoder_decoder_from_config(
-        model_config: DenseEncoderDecoderConfig,
+        model_config: EncoderDecoderConfig,
         num_features: int
 ) -> DenseEncoderDecoder:
     """Create DenseEncoderDecoder model from configuration."""
-    block_factory = BLOCK_CLASSES[model_config.block_factory]
+    block_factory = BLOCK_FACTORIES[model_config.block_factory]
     return DenseEncoderDecoder(
         block_factory=block_factory,
         in_channels=num_features,
         channels=model_config.channels,
         depths=model_config.depths,
         out_channels=model_config.out_channels,
-        bilinear=model_config.bilinear,
     )
 
 
@@ -57,45 +61,28 @@ def main():
     """Main testing function - all configuration from TOML files and saved model."""
     parser = argparse.ArgumentParser(description="Test DenseEncoderDecoder model")
     parser.add_argument("model", help="Path to model weight or checkpoint file.")
+    add_common_args(parser, testing=True)
     args = parser.parse_args()
 
-    # Load weights and configs
     model_path = Path(args.model)
-    if not model_path.exists():
-        raise FileNotFoundError(f"Provided model path '{model_path}' doesn't exist.")
+    saved = load_saved_model(model_path)
+    satrain_config = load_satrain_config_for_test(saved)
+    loss = get_loss(**saved["loss_config"])
+    LOGGER.info(f"Loaded model file {model_path} (loss: {loss.name})")
 
-    loaded = torch.load(model_path, map_location=torch.device("cpu"), weights_only=True)
-    state = loaded["state_dict"]
-
-    # Remove model prefix for checkpoint files.
-    if model_path.suffix == ".ckpt":
-        state = {key[6:]: val for key, val in state.items()}
-
-    satrain_config = SatRainConfig(**loaded["satrain_config"])
-    LOGGER.info(f"Loaded SatRain config from model file {model_path}")
-    
-    # Load model configuration if available
-    if "model_config" in loaded:
-        model_config = DenseEncoderDecoderConfig(**loaded["model_config"])
-        LOGGER.info(f"Loaded model config from model file: {model_config.model_name}")
+    if saved["model_config"] is not None:
+        model_config = EncoderDecoderConfig(**saved["model_config"])
     else:
-        # Fallback: try to load from separate TOML file
         model_config_path = Path("model.toml")
-        if model_config_path.exists():
-            model_config = DenseEncoderDecoderConfig.from_toml_file(model_config_path)
-            LOGGER.info(f"Loaded model config from: {model_config_path}")
-        else:
+        if not model_config_path.exists():
             raise FileNotFoundError(
                 "No model configuration found. Either save model with model_config "
                 "or provide model.toml file."
             )
+        model_config = EncoderDecoderConfig.from_toml_file(model_config_path)
+    model_config.out_channels = loss.n_outputs
 
-    # Load compute configuration
-    compute_config_path = Path("compute.toml")
-    if not compute_config_path.exists():
-        raise FileNotFoundError(f"Compute config not found: {compute_config_path}")
-    compute_config = ComputeConfig.from_toml_file(compute_config_path)
-    LOGGER.info(f"Loaded compute config from: {compute_config_path}")
+    compute_config = load_compute_config(args)
 
     # Create data module
     data_module = SatRainDataModule(
@@ -111,64 +98,42 @@ def main():
         model_config=model_config,
         num_features=satrain_config.num_features,
     )
-    encoder_decoder_model.load_state_dict(state)
-    
+    encoder_decoder_model.load_state_dict(saved["state_dict"])
     LOGGER.info(f"Loaded {model_config.model_name} with {encoder_decoder_model.num_parameters:,} parameters")
 
     # Create Lightning module
     lightning_module = SatRainEstimationModule(
         model=encoder_decoder_model,
-        loss=nn.MSELoss(),
+        loss=loss,
         approach=compute_config.approach,
-        name=model_config.model_name,
     )
-    experiment_name = lightning_module.experiment_name
+    experiment_name = model_path.stem
 
-    # Run evaluation on different domains
-    results = []
-    domains = ["austria", "conus", "korea"]
-    for domain in domains:
-        LOGGER.info("Running evaluation for domain '%s'.", domain)
-        evaluator = data_module.get_evaluator(domain)
-        evaluator.evaluate(
-            lightning_module.get_retrieval_fn(satrain_config, compute_config),
-            batch_size=4 * compute_config.batch_size,
-            tile_size=satrain_config.tile_size,
-        )
-        results.append(evaluator.get_results())
+    results = run_evaluation(
+        lightning_module,
+        data_module,
+        satrain_config,
+        compute_config,
+        batch_size=4 * compute_config.batch_size,
+    )
 
-    results = xr.concat(results, dim="domain")
-    results["domain"] = domains
-
-    # Save results with model information
-    output_path = Path(".") / "test_results"
-    output_path.mkdir(exist_ok=True)
-    
-
-    # Add comprehensive model metadata to results
-    model_metadata = {
-        # Model identification
-        "model_name": model_config.model_name,
-        "experiment_name": experiment_name,
-        
-        # Model architecture details
-        "block_factory": model_config.block_factory,
-        "in_channels": model_config.in_channels,
-        "out_channels": model_config.out_channels,
-        "channels": str(model_config.channels),  # Convert list to string for NetCDF
-        "depths": str(model_config.depths),      # Convert list to string for NetCDF
-        "bilinear": int(model_config.bilinear),  # Convert boolean to int for NetCDF
-        
-        # Model complexity metrics
-        "num_parameters": encoder_decoder_model.num_parameters,
-        "num_trainable_parameters": encoder_decoder_model.num_trainable_parameters,
-    }
-    
-    results.attrs.update(model_metadata)
-    
-    results.to_netcdf(output_path / f"{experiment_name}.nc")
-    
-    LOGGER.info(f"Evaluation completed. Results saved to: {output_path / f'{experiment_name}.nc'}")
+    attrs = result_attrs(
+        satrain_config,
+        compute_config,
+        loss,
+        experiment_name,
+        MODEL_FAMILY,
+        model_name=model_config.model_name,
+        study=args.study,
+        block_factory=model_config.block_factory,
+        in_channels=model_config.in_channels,
+        out_channels=model_config.out_channels,
+        channels=str(model_config.channels),
+        depths=str(model_config.depths),
+        num_parameters=encoder_decoder_model.num_parameters,
+        num_trainable_parameters=encoder_decoder_model.num_trainable_parameters,
+    )
+    save_test_results(results, experiment_name, attrs)
 
 
 if __name__ == "__main__":

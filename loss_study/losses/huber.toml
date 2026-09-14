@@ -1,0 +1,6 @@
+name = "huber"
+task = "regression"
+description = "Huber loss: quadratic for |error| < delta, linear beyond. delta is in mm/h."
+
+[args]
+delta = 1.0

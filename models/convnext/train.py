@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
 """
-Training script for ConvNeXt model on SatRain dataset.
-All configuration is read from TOML files.
+Training script for the ConvNeXt model on the SatRain dataset.
+All configuration is read from TOML files; the loss can be selected with --loss.
 """
 import argparse
 import logging
 from pathlib import Path
 
-import torch
-import torch.nn as nn
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 
 from satrain_models import (
-    SatRainEstimationModule, SatRainConfig, create_convnext,
-    SatRainDataModule, tensorboard_to_netcdf, ComputeConfig, ConvNeXtConfig
+    SatRainEstimationModule, create_convnext,
+    SatRainDataModule, ConvNeXtConfig
+)
+from satrain_models.cli import (
+    add_common_args,
+    load_compute_config,
+    load_dataset_config,
+    resolve_loss_from_args,
+    save_training_artifacts,
 )
 
 LOGGER = logging.getLogger("convnext_training")
+
+MODEL_FAMILY = "convnext"
+
 
 def main():
     """Main training function - all configuration from TOML files."""
     parser = argparse.ArgumentParser(description="Train ConvNeXt model")
     parser.add_argument("model_config", help="Path to model configuration TOML file")
-    parser.add_argument(
-        "--dataset-config", help="Path to dataset config file.", default="dataset.toml"
-    )
+    add_common_args(parser)
     args = parser.parse_args()
 
     # Load model configuration
@@ -36,19 +41,9 @@ def main():
     model_config = ConvNeXtConfig.from_toml_file(model_config_path)
     LOGGER.info(f"Loaded model config from: {model_config_path}")
 
-    # Load dataset configuration
-    dataset_config_path = Path(args.dataset_config)
-    if not dataset_config_path.exists():
-        raise FileNotFoundError(f"Dataset config not found: {dataset_config_path}")
-    config = SatRainConfig.from_toml_file(dataset_config_path)
-    LOGGER.info(f"Loaded SatRain config from: {dataset_config_path}")
-
-    # Load compute configuration
-    compute_config_path = Path("compute.toml")
-    if not compute_config_path.exists():
-        raise FileNotFoundError(f"Compute config not found: {compute_config_path}")
-    compute_config = ComputeConfig.from_toml_file(compute_config_path)
-    LOGGER.info(f"Loaded compute config from: {compute_config_path}")
+    config = load_dataset_config(args)
+    compute_config = load_compute_config(args)
+    loss = resolve_loss_from_args(args, compute_config)
 
     # Create data module
     datamodule = SatRainDataModule(
@@ -59,23 +54,24 @@ def main():
         persistent_workers=compute_config.persistent_workers,
     )
 
-    # Create ConvNeXt model
+    # Create ConvNeXt model; the loss dictates the number of outputs.
     convnext_model = create_convnext(
         n_channels=datamodule.num_features,
-        n_outputs=1,
+        n_outputs=loss.n_outputs,
         model_size=model_config.model_size,
         pretrained=model_config.pretrained,
     )
 
     # Create experiment name that includes dataset configuration
-    dataset_prefix = config.get_experiment_name_prefix("convnext")
+    dataset_prefix = config.get_experiment_name_prefix(MODEL_FAMILY)
     full_experiment_name = f"{dataset_prefix}_{model_config.model_name}"
-    
+
     # Create Lightning module with custom name
     lightning_module = SatRainEstimationModule(
         model=convnext_model,
-        loss=nn.MSELoss(),
+        loss=loss,
         approach=compute_config.approach,
+        learning_rate=compute_config.learning_rate,
         name=full_experiment_name,
     )
     experiment_name = lightning_module.experiment_name
@@ -94,46 +90,29 @@ def main():
         log_every_n_steps=compute_config.log_every_n_steps,
         check_val_every_n_epoch=compute_config.check_val_every_n_epoch,
         accumulate_grad_batches=compute_config.accumulate_grad_batches,
+        **compute_config.trainer_overrides(),
     )
 
     # Train the model
-    LOGGER.info(f"Starting training: {model_config.model_name}")
+    LOGGER.info(f"Starting training: {experiment_name}")
     trainer.fit(lightning_module, datamodule)
 
-    # Extract and save training metrics
-    LOGGER.info(f"Training finished. Saving metrics.")
-    current_log_dir = loggers[0].log_dir
-    netcdf_dir = Path("netcdf_metrics")
-    netcdf_dir.mkdir(exist_ok=True)
-    log_path = Path(current_log_dir)
-    version_name = log_path.name
-    metadata = {
-        "experiment": "convnext",
-        "model_name": model_config.model_name,
-        "version": version_name,
-        "approach": compute_config.approach,
-        "model_size": model_config.model_size,
-        "pretrained": str(model_config.pretrained),
-    }
-    output_path = netcdf_dir / (experiment_name + ".nc")
-    tensorboard_to_netcdf(
-        log_dir=current_log_dir, output_path=output_path, metadata=metadata
+    # Save training metrics and model weights
+    LOGGER.info("Training finished. Saving metrics.")
+    save_training_artifacts(
+        lightning_module,
+        loggers[0].log_dir,
+        config,
+        compute_config,
+        MODEL_FAMILY,
+        model_config=model_config.to_dict(),
+        model_name=model_config.model_name,
+        study=args.study,
+        model_size=model_config.model_size,
+        pretrained=str(model_config.pretrained),
+        num_parameters=sum(p.numel() for p in convnext_model.parameters()),
+        num_trainable_parameters=sum(p.numel() for p in convnext_model.parameters() if p.requires_grad),
     )
-
-    # Save model with dataset and model config
-    output_path = Path("models")
-    output_path.mkdir(exist_ok=True)
-    
-    # Save model manually to include both configs
-    model_path = output_path / f"{experiment_name}.pt"
-    state = lightning_module.model.state_dict()
-    torch.save({
-        "state_dict": state,
-        "satrain_config": config.to_dict(),
-        "model_config": model_config.to_dict(),
-    }, model_path)
-    
-    LOGGER.info(f"Model saved to: {model_path}")
 
 
 if __name__ == "__main__":

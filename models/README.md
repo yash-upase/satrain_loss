@@ -30,7 +30,30 @@ along with essential logging. Reusing this module helps ensure that PyTorch
 model training remains consistent and comparable. See the ``train.py`` script in
 the ``basic_unet`` example for an example of how to use the lightning module.
 
-  
+## Loss selection and common command-line options
+
+All PyTorch ``train.py`` / ``test.py`` scripts use ``satrain_models.cli`` and
+therefore share these options:
+
+```
+--loss NAME|path.toml     loss to train with (default: 'loss' in compute.toml, else mse)
+--loss-arg KEY=VALUE      loss constructor argument (repeatable)
+--dataset-config PATH     dataset TOML (default dataset.toml)
+--compute-config PATH     compute TOML (default compute.toml)
+--devices 0,1 | cpu       override devices without editing compute.toml
+--max-epochs N / --batch-size N
+--study TAG               tag written to result files (used by loss_study/)
+```
+
+The loss determines the number of output channels (``loss.n_outputs``) and how
+raw outputs are turned into retrieval quantities (``loss.predict``), so a
+``train.py`` only needs to pass ``n_outputs=loss.n_outputs`` to its model
+factory and ``loss=loss`` to the Lightning module. ``test.py`` reads the loss
+back from the saved ``.pt`` file. Result files (``netcdf_metrics/``,
+``test_results/``) carry ``loss``, ``loss_args``, ``subset``, ``approach`` and
+``study`` attributes.
+
+
 
 ## Requirements File Format
 

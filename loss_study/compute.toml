@@ -1,0 +1,31 @@
+# Fixed training recipe for the loss-comparison study.
+#
+# Everything that could confound a loss comparison is pinned here and shared
+# by all models and all losses. Only 'devices' may differ between
+# machines -- pass it on the command line (run_loss.py --devices N)
+# . batch_size is set per model in models.toml.
+
+# === Hardware Configuration ===
+accelerator = "cuda"          # "cpu", "cuda", "mps", "auto"
+devices = [0]                 # Overridden by --devices
+precision = "bf16-mixed"      # "16", "bf16", "32", "16-mixed", "bf16-mixed"
+
+# === Training Configuration ===
+max_epochs = 40               # Main compute ; identical for every loss & model
+batch_size = 16               # Default; per-model value in models. (importnat to note)
+approach = "adamw_warmup_cosine_annealing_restarts"
+# learning_rate = 4.14e-4     # default
+
+# === Data Loading ===
+num_workers = 8
+pin_memory = true
+persistent_workers = false
+
+# === Training Control ===
+accumulate_grad_batches = 1
+log_every_n_steps = 50
+check_val_every_n_epoch = 1
+
+# === Loss (default only; run_loss.py passes --loss explicitly) ===
+loss = "mse"
+[loss_args]

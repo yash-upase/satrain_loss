@@ -1,0 +1,5 @@
+name = "mae"
+task = "regression"
+description = "Mean absolute error (L1). Robust to outliers, estimates the conditional median."
+
+[args]

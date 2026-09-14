@@ -1,0 +1,6 @@
+name = "tweedie"
+task = "regression"
+description = "Tweedie deviance (compound Poisson-Gamma, 1 < p < 2) with softplus link; suited to zero-inflated rain rates."
+
+[args]
+p = 1.5

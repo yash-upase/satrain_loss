@@ -238,6 +238,11 @@ class ComputeConfig(SatRainConfig):
     approach: str = "adamw_warmup_cosine_annealing_restarts"
     learning_rate: Optional[float] = None
 
+    # Loss selection: a registered name from ``satrain_models.losses`` (or a
+    # dotted import path) and its constructor arguments (TOML ``[loss_args]``).
+    loss: str = "mse"
+    loss_args: Dict[str, Any] = field(default_factory=dict)
+
     max_epochs: int = 100
     batch_size: int = 32
     num_workers: int = 4
@@ -257,6 +262,8 @@ class ComputeConfig(SatRainConfig):
         """Parse compute configuration from keyword arguments."""
         self.approach = kwargs.pop("approach", "adamw_warmup_cosine_annealing_restarts")
         self.learning_rate = kwargs.pop("learning_rate", None)
+        self.loss = kwargs.pop("loss", "mse")
+        self.loss_args = dict(kwargs.pop("loss_args", {}) or {})
         self.max_epochs = kwargs.pop("max_epochs", 100)
         self.batch_size = kwargs.pop("batch_size", 8)
         self.num_workers = kwargs.pop("num_workers", 4)
@@ -269,12 +276,44 @@ class ComputeConfig(SatRainConfig):
         self.accumulate_grad_batches = kwargs.pop("accumulate_grad_batches", 1)
         self.log_every_n_steps = kwargs.pop("log_every_n_steps", 100)
         self.check_val_every_n_epoch = kwargs.pop("check_val_every_n_epoch", 1)
+        # Debug knob: limit the number of train/val batches per epoch (smoke tests).
+        self.limit_batches = kwargs.pop("limit_batches", None)
         self.model_config = kwargs.pop("model_config", {})
 
         if 0 < len(kwargs):
             raise ValueError(
                 f"Encountered unsupported configuration arguments: {list(kwargs.keys())}"
             )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Plain-dictionary representation (used for result metadata)."""
+        return {
+            "approach": self.approach,
+            "learning_rate": self.learning_rate,
+            "loss": self.loss,
+            "loss_args": dict(self.loss_args),
+            "max_epochs": self.max_epochs,
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "accelerator": self.accelerator,
+            "devices": self.devices,
+            "precision": self.precision,
+            "pin_memory": self.pin_memory,
+            "persistent_workers": self.persistent_workers,
+            "accumulate_grad_batches": self.accumulate_grad_batches,
+            "log_every_n_steps": self.log_every_n_steps,
+            "check_val_every_n_epoch": self.check_val_every_n_epoch,
+            "limit_batches": self.limit_batches,
+        }
+
+    def trainer_overrides(self) -> Dict[str, Any]:
+        """Extra ``lightning.Trainer`` keyword arguments derived from debug knobs."""
+        if self.limit_batches is None:
+            return {}
+        return {
+            "limit_train_batches": self.limit_batches,
+            "limit_val_batches": self.limit_batches,
+        }
 
     @property
     def device(self):

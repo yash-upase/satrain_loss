@@ -184,7 +184,16 @@ logs/
 runs/
 wandb/
 mlruns/
+lightning_logs/
+models/*/models/
+loss_study/logs/
+loss_study/.tmp/
 
 # Temporary files
 *.tmp
 *.temp
+# Test-data downloads created by tests/conftest.py
+tests/satrain/
+tests/config.toml
+/satrain/
+/config.toml

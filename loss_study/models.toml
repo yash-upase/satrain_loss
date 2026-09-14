@@ -1,0 +1,59 @@
+# Model matrix for the loss-comparison study.
+#
+# One entry per PyTorch model directory under models/. For every loss, each
+# model is trained exactly once with the configuration given here, using the
+# shared loss_study/compute.toml and loss_study/dataset_<dataset>.toml.
+#
+#   train_arg   positional argument passed to train.py ("" = none)
+#   dataset     "spatial" or "tabular" -> which dataset_*.toml to use
+#   batch_size  per-model batch size (memory bound); identical across losses.
+#               Values verified to fit a 12 GB GPU with bf16-mixed precision.
+#   note        free text
+
+[basic_unet]
+train_arg = ""
+dataset = "spatial"
+batch_size = 32
+note = "Reference U-Net (create_unet, bilinear upsampling)"
+
+[encoder_decoder]
+train_arg = "model_unet_medium.toml"
+dataset = "spatial"
+batch_size = 16
+note = "Generic encoder-decoder, Conv2dBnReLU blocks, medium size"
+
+[dense_encoder_decoder]
+train_arg = "model_resnext_d2.toml"
+dataset = "spatial"
+batch_size = 4
+note = "UNet++ style dense encoder-decoder"
+
+[efficient_net_v2]
+train_arg = "model_medium.toml"
+dataset = "spatial"
+batch_size = 32
+note = "EfficientNetV2-M encoder (pretrained) + UNet decoder"
+
+[convnext]
+train_arg = "model_small.toml"
+dataset = "spatial"
+batch_size = 32
+note = "ConvNeXt-S encoder (pretrained) + UNet decoder"
+
+[ResNet]
+train_arg = "model_medium.toml"
+dataset = "spatial"
+batch_size = 4
+note = "ResNet on 64x64 tiles (tile size overridden in its train.py)"
+
+[fully_connected]
+train_arg = "model_medium.toml"
+dataset = "tabular"
+batch_size = 16384
+note = "Pixel-wise MLP on tabular on-swath data"
+
+[ipwg_net]
+train_arg = "ipwg_net.toml"
+dataset = "spatial"
+batch_size = 8
+note = "IPWG-Net (residual encoder-decoder)"

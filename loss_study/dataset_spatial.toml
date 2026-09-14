@@ -1,0 +1,14 @@
+# Fixed SatRain dataset configuration for the loss-comparison study
+# (spatial / CNN models). Do NOT change this file for individual runs; every
+# loss must be trained on exactly the same data.
+base_sensor = "gmi"         # 'gmi' or 'atms'
+geometry = "gridded"        # "gridded" or "on_swath"
+subset = "m"                # "xs", "s", "m", "l", "xl"  -- 'm' keeps runs affordable
+format = "spatial"
+
+# Retrieval input configurations (all inputs defined here are active by default)
+[[retrieval_input]]
+name = "gmi"
+include_angles = false      # Include earth incidence angles
+normalize = "minmax"        # "standardize", "minmax", or null
+nan = -1.5                  # Value to replace NaN with

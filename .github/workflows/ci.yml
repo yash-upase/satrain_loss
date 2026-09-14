@@ -17,7 +17,9 @@ jobs:
         
     steps:
     - uses: actions/checkout@v4
-    
+      with:
+        fetch-depth: 0
+
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
@@ -32,7 +34,13 @@ jobs:
     - name: Test with pytest
       run: |
         pytest tests/ -v --cov=satrain_models --cov-report=xml --cov-report=term-missing
-        
+
+    - name: Validate submitted loss-study results
+      if: github.event_name == 'pull_request'
+      run: |
+        git fetch origin ${{ github.base_ref }} --depth=1
+        python loss_study/validate_results.py --changed
+
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Clean PyTorch Lightning training script for ResNet model on SatRain dataset.
-All configuration is read from TOML files.
+PyTorch Lightning training script for the ResNet model on the SatRain dataset.
+All configuration is read from TOML files; the loss can be selected with --loss.
 
 Created: January 2026
 questions: veljko.petkovic@umd.edu
@@ -15,18 +15,21 @@ from pathlib import Path
 import torch
 
 import lightning as L
-import torch.nn as nn
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from satrain_models import (
-    ComputeConfig,
     SatRainConfig,
     SatRainDataModule,
     SatRainEstimationModule,
     create_resnet_from_config,
     ResNetConfig,
-    tensorboard_to_netcdf,
+)
+from satrain_models.cli import (
+    add_common_args,
+    load_compute_config,
+    load_dataset_config,
+    resolve_loss_from_args,
+    save_training_artifacts,
 )
 
 # Override tile_size for ResNet model
@@ -35,6 +38,8 @@ RESNET_TILE_SIZE = (64, 64)
 SatRainConfig.tile_size = property(lambda self: RESNET_TILE_SIZE)
 
 LOGGER = logging.getLogger("resnet_training")
+
+MODEL_FAMILY = "resnet"
 
 # veljko
 # Default (highest precision, TensorFloat32 disabled)
@@ -88,9 +93,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Train ResNet model")
     parser.add_argument("model_config", help="Path to model configuration TOML file")
-    parser.add_argument(
-        "--dataset-config", help="Path to dataset config file.", default="dataset.toml"
-    )
+    add_common_args(parser)
     args = parser.parse_args()
 
     # Load model configuration
@@ -100,19 +103,9 @@ def main():
     model_config = ResNetConfig.from_toml_file(model_config_path)
     LOGGER.info(f"Loaded model config from: {model_config_path}")
 
-    # Load dataset configuration
-    dataset_config_path = Path(args.dataset_config)
-    if not dataset_config_path.exists():
-        raise FileNotFoundError(f"Dataset config not found: {dataset_config_path}")
-    config = SatRainConfig.from_toml_file(dataset_config_path)
-    LOGGER.info(f"Loaded SatRain config from: {dataset_config_path}")
-
-    # Load compute configuration
-    compute_config_path = Path("compute.toml")
-    if not compute_config_path.exists():
-        raise FileNotFoundError(f"Compute config not found: {compute_config_path}")
-    compute_config = ComputeConfig.from_toml_file(compute_config_path)
-    LOGGER.info(f"Loaded compute config from: {compute_config_path}")
+    config = load_dataset_config(args)
+    compute_config = load_compute_config(args)
+    loss = resolve_loss_from_args(args, compute_config)
 
     # Create data module
     datamodule = SatRainDataModule(
@@ -123,15 +116,18 @@ def main():
         persistent_workers=compute_config.persistent_workers,
     )
 
-    # Create model from configuration
+    # Create model from configuration; the loss dictates the number of outputs.
     model_config.n_channels = datamodule.num_features
+    model_config.n_outputs = loss.n_outputs
     resnet_model = create_resnet_from_config(
         model_config=model_config,
         num_features=datamodule.num_features,
     )
-    
-    LOGGER.info(f"Created {model_config.model_name} with {sum(1 for _ in resnet_model.parameters())} parameters")
-    
+
+    num_parameters = sum(p.numel() for p in resnet_model.parameters())
+    num_trainable_parameters = sum(p.numel() for p in resnet_model.parameters() if p.requires_grad)
+    LOGGER.info(f"Created {model_config.model_name} with {num_parameters:,} parameters")
+
     # Store model architecture info for metadata
     model_arch_config = {
         "n_channels": model_config.n_channels,
@@ -139,19 +135,20 @@ def main():
         "blocks_per_layer": model_config.blocks_per_layer,
         "n_layers": model_config.n_layers,
         "base_channels": model_config.base_channels,
-        "num_parameters": sum(p.numel() for p in resnet_model.parameters()),
-        "num_trainable_parameters": sum(p.numel() for p in resnet_model.parameters() if p.requires_grad),
+        "num_parameters": num_parameters,
+        "num_trainable_parameters": num_trainable_parameters,
     }
 
     # Create experiment name that includes dataset and model configuration
-    dataset_prefix = config.get_experiment_name_prefix("resnet")
+    dataset_prefix = config.get_experiment_name_prefix(MODEL_FAMILY)
     full_experiment_name = f"{dataset_prefix}_{model_config.model_name}"
-    
+
     # Create Lightning module with custom name
     lightning_module = SatRainEstimationModule(
         model=resnet_model,
-        loss=nn.MSELoss(),
+        loss=loss,
         approach=compute_config.approach,
+        learning_rate=compute_config.learning_rate,
         name=full_experiment_name,
     )
     experiment_name = lightning_module.experiment_name
@@ -170,50 +167,33 @@ def main():
         log_every_n_steps=compute_config.log_every_n_steps,
         check_val_every_n_epoch=compute_config.check_val_every_n_epoch,
         accumulate_grad_batches=compute_config.accumulate_grad_batches,
+        **compute_config.trainer_overrides(),
     )
 
     # Train the model
-    LOGGER.info(f"Starting training: {model_config.model_name}")
+    LOGGER.info(f"Starting training: {experiment_name}")
     trainer.fit(lightning_module, datamodule)
 
-    # Extract and save training metrics (only on rank 0 to avoid file conflicts)
+    # Save artifacts (only on rank 0 to avoid file conflicts)
     if trainer.is_global_zero:
-        LOGGER.info(f"Training finished. Saving metrics.")
+        LOGGER.info("Training finished. Saving metrics.")
         current_log_dir = loggers[0].log_dir
-        netcdf_dir = Path("netcdf_metrics")
-        netcdf_dir.mkdir(exist_ok=True)
-        log_path = Path(current_log_dir)
-        version_name = log_path.name
-        metadata = {
-            "experiment": "resnet",
-            "model_name": model_config.model_name,
-            "version": version_name,
-            "approach": compute_config.approach,
-            "num_parameters": sum(p.numel() for p in resnet_model.parameters()),
-        }
-        output_path = netcdf_dir / (experiment_name + ".nc")
-        tensorboard_to_netcdf(
-            log_dir=current_log_dir, output_path=output_path, metadata=metadata
+        artifacts = save_training_artifacts(
+            lightning_module,
+            current_log_dir,
+            config,
+            compute_config,
+            MODEL_FAMILY,
+            model_config=model_config.to_dict(),
+            model_name=model_config.model_name,
+            study=args.study,
+            num_parameters=num_parameters,
+            num_trainable_parameters=num_trainable_parameters,
         )
-
-        # Save model with dataset config
-        output_path = Path("models")
-        output_path.mkdir(exist_ok=True)
-
-        # Save model manually to include both configs
-        model_path = output_path / f"{experiment_name}.pt"
-        state = lightning_module.model.state_dict()
-        torch.save({
-            "state_dict": state,
-            "satrain_config": config.to_dict(),
-            "model_config": model_config.to_dict(),
-        }, model_path)
-
-        LOGGER.info(f"Model saved to: {model_path}")
 
         # Save training metadata to separate JSON file
         save_training_metadata(
-            output_path=output_path,
+            output_path=artifacts["model"].parent,
             experiment_name=experiment_name,
             model_config=model_arch_config,
             dataset_config={
@@ -225,20 +205,7 @@ def main():
                 "retrieval_input": str(config.retrieval_input),
                 "target_config": str(config.target_config) if hasattr(config, 'target_config') else None,
             },
-            compute_config={
-                "accelerator": compute_config.accelerator,
-                "devices": compute_config.devices,
-                "precision": compute_config.precision,
-                "max_epochs": compute_config.max_epochs,
-                "batch_size": compute_config.batch_size,
-                "approach": compute_config.approach,
-                "num_workers": compute_config.num_workers,
-                "pin_memory": compute_config.pin_memory,
-                "persistent_workers": compute_config.persistent_workers,
-                "accumulate_grad_batches": compute_config.accumulate_grad_batches,
-                "log_every_n_steps": compute_config.log_every_n_steps,
-                "check_val_every_n_epoch": compute_config.check_val_every_n_epoch,
-            },
+            compute_config=compute_config.to_dict(),
             training_info={
                 "epochs_trained": trainer.current_epoch + 1,
                 "global_step": trainer.global_step,
