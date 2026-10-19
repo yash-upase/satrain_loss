@@ -1,4 +1,4 @@
-# Walkthrough: you took the `mae` loss
+# Walkthrough: running one loss (example: `mae`)
 
 This is the complete, start-to-finish path for one contributor. Replace `mae`
 with your loss everywhere; nothing else changes.
@@ -78,8 +78,8 @@ values for all eight models.
 Everything else — dataset subset, optimizer schedule, epochs, precision,
 batch sizes, model sizes — is fixed in `loss_study/compute.toml`,
 `loss_study/dataset_*.toml` and `loss_study/models.toml`. **Do not edit those
-files.** If a model does not fit on your GPU, do let everyone know; the batch size
-can be changed for everyone.
+files.** If a model does not fit on your GPU, please open an issue; the batch size
+is then changed for everyone, so that all runs stay comparable.
 
 ## 5. Smoke test (5 minutes)
 
@@ -173,8 +173,8 @@ the eight models and confirm the checklist:
 - [x] Only `.nc` result files included
 - [x] `[args]` unchanged (or explained)
 
-CI re-runs the validator on your files. When it is green the lead merges, and
-your loss appears in `loss_study/results/leaderboard.md` next to the others.
+CI re-runs the validator on your files. Once CI is green and the PR is
+reviewed, it is merged and your loss appears in `loss_study/results/leaderboard.md` next to the others.
 
 ## 10. Afterwards
 

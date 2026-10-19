@@ -6,7 +6,7 @@ trained once per loss under an identical, fixed recipe, and the resulting
 scores are collected into one leaderboard.
 
 The current study is **regression of the surface rain rate** with these losses
-(one team member per loss):
+(each loss is run by one contributor):
 
 | loss | file | idea |
 |---|---|---|
@@ -22,16 +22,16 @@ Detection and hybrid (rate + flag) losses will be added later as further
 phases; the code already supports them.
 
 **New here? Read [`WALKTHROUGH.md`](WALKTHROUGH.md)** — a step-by-step example
-of one participant doing the `mae` loss from clone to pull request.
+of running the `mae` loss from clone to pull request.
 For the full background — what changed relative to upstream, diagrams of the
-pipeline,  workflows — see
+pipeline and the workflows — see
 [`STUDY_GUIDE.md`](STUDY_GUIDE.md).
 
 ## Layout
 
 ```
 loss_study/
-├── README.md              this file (team protocol)
+├── README.md              this file (study protocol)
 ├── compute.toml           FIXED training recipe (optimizer schedule, epochs, precision)
 ├── dataset_spatial.toml   FIXED dataset for CNN models   (gmi / gridded / subset m)
 ├── dataset_tabular.toml   FIXED dataset for pixel models (gmi / on_swath / subset m)
@@ -40,7 +40,7 @@ loss_study/
 ├── run_loss.py            train + test ONE loss on ALL models
 ├── validate_results.py    checks submitted result files (also run in CI)
 ├── aggregate.py           builds results/summary.csv + leaderboard.md
-├── results/               generated tables (committed by the lead)
+├── results/               generated tables (updated after each merge)
 └── notebooks/compare_losses.ipynb   heat-maps and plots from summary.csv
 ```
 
@@ -55,7 +55,7 @@ Experiment names always contain the loss, e.g.
 and every result file carries `loss`, `loss_args`, `subset`, `approach`,
 `study = "loss_comparison"` attributes so it can be grouped automatically.
 
-## Protocol for team members (one loss each)
+## Protocol for contributors (one loss each)
 
 1. **Set up** (once)
    ```bash
@@ -66,8 +66,8 @@ and every result file carries `loss`, `loss_args`, `subset`, `approach`,
    ```
    The SatRain data (subset `m`) is downloaded automatically on first use.
 
-2. **Pick your loss** (agreed within the team, not on GitHub): one of the files
-   in `losses/`. You may tune its `[args]` *before* you start (document why in
+2. **Pick a loss**: one of the files in `losses/`, coordinated among
+   contributors so that each loss is run only once. You may tune its `[args]` *before* you start (document why in
    the PR) — but the same args must be used for all models.
 
 3. **Run** on a branch named `loss/<name>`:
@@ -78,7 +78,7 @@ and every result file carries `loss`, `loss_args`, `subset`, `approach`,
    ```
    `--devices` is the only thing you should change between machines. Do **not**
    edit `compute.toml`, `dataset_*.toml` or `models.toml`; if a model doesn't
-   fit in memory, open an issue instead so the lead can change the batch size
+   fit in memory, open an issue instead so that the batch size can be changed
    for everyone. Logs are in `loss_study/logs/`.
 
 4. **Check** your results before submitting:
@@ -108,19 +108,21 @@ Runs started with `--subset` / `--max-epochs` / `--limit-batches` /
 `aggregate.py` and rejected by `validate_results.py`, so they can't pollute
 the study.
 
-## Protocol for the lead
+## Role of the repo owner
 
-1. Run the **MSE baseline** yourself (`run_loss.py mse`) and merge it first.
-2. Agree in the team who runs which loss; point everyone to this README / `WALKTHROUGH.md`.
-3. Review PRs: CI must be green; eyeball `loss_args` in the file attributes.
-4. After each merge:
+The repo owner looks after the shared parts of the study:
+
+1. The **MSE baseline** (`run_loss.py mse`), merged before the other losses.
+2. Keeping track of which loss each contributor is running, so that no loss is run twice.
+3. Reviewing PRs: CI must be green and `loss_args` in the file attributes must match the TOML.
+4. Updating the leaderboard after each merge:
    ```bash
    python loss_study/aggregate.py          # -> results/summary.csv, leaderboard.md
    git add loss_study/results && git commit -m "Update leaderboard"
    ```
    `notebooks/compare_losses.ipynb` reads `results/summary.csv` for figures.
-5. Later phases (detection / hybrid losses): add `losses/<name>.toml` files
-   and aggregate with `--task detection` / `--task hybrid`.
+5. Later phases (detection / hybrid losses): adding `losses/<name>.toml` files
+   and aggregating with `--task detection` / `--task hybrid`.
 
 ## Adding a new loss
 

@@ -28,7 +28,5 @@ Notes (failures, hardware, anything unusual):
 
 ## Code change
 
-What does this change and why?
-
 - [ ] `pytest tests/` passes
 - [ ] New losses are registered with `@register_loss` and have a `loss_study/losses/<name>.toml`

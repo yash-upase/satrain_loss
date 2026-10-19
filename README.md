@@ -58,7 +58,7 @@ python test.py models/<experiment>.pt          # loss is read from the model fil
 ```
 
 The experiment name and all result files record the loss. `loss_study/`
-contains the protocol and tooling for the team study in which every model is
+contains the protocol and tooling for the collaborative study in which every model is
 trained with every loss under one fixed recipe — see `loss_study/README.md`,
 and `CONTRIBUTING.md` for adding a loss.
 
