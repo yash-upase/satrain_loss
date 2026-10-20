@@ -143,7 +143,10 @@ def test_lightning_module_tabular(
     with torch.no_grad():
         pred = model(x)
 
-    assert pred.shape == (32, 1)
+    # Tabular batches may be smaller than batch_size (e.g. at file boundaries
+    # in recent satrain versions), so only check consistency with the input.
+    assert pred.shape == (x.shape[0], 1)
+    assert 0 < x.shape[0] <= 32
 
     # Test training
     trainer = L.Trainer(
