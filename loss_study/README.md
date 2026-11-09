@@ -1,12 +1,11 @@
 # SatRain loss-comparison study
 
 This directory holds everything needed to run and evaluate the **loss-function
-intercomparison** on the SatRain benchmark: every PyTorch model in `models/` is
-trained once per loss under an identical, fixed recipe, and the resulting
+intercomparison** on the SatRain benchmark: the PyTorch models in `models/`
+are trained once per loss under an identical, fixed recipe, and the resulting
 scores are collected into one leaderboard.
 
-The current study is **regression of the surface rain rate** with these losses
-(each loss is run by one contributor):
+The study targets **regression of the surface rain rate** with these losses:
 
 | loss | file | idea |
 |---|---|---|
@@ -37,7 +36,7 @@ loss_study/
 ├── dataset_tabular.toml   FIXED dataset for pixel models (gmi / on_swath / subset m)
 ├── models.toml            model matrix: which config + batch size per model dir
 ├── losses/<loss>.toml     one file per loss: name, args, description
-├── run_loss.py            train + test ONE loss on ALL models
+├── run_loss.py            train + test ONE loss on all (or selected) models
 ├── validate_results.py    checks submitted result files (also run in CI)
 ├── aggregate.py           builds results/summary.csv + leaderboard.md
 ├── results/               generated tables (updated after each merge)
@@ -55,7 +54,7 @@ Experiment names always contain the loss, e.g.
 and every result file carries `loss`, `loss_args`, `subset`, `approach`,
 `study = "loss_comparison"` attributes so it can be grouped automatically.
 
-## Protocol for contributors (one loss each)
+## Running a loss
 
 1. **Set up** (once)
    ```bash
@@ -66,17 +65,19 @@ and every result file carries `loss`, `loss_args`, `subset`, `approach`,
    ```
    The SatRain data (subset `m`) is downloaded automatically on first use.
 
-2. **Pick a loss**: one of the files in `losses/`, coordinated among
-   contributors so that each loss is run only once. You may tune its `[args]` *before* you start (document why in
-   the PR) — but the same args must be used for all models.
+2. **Choose a loss**: one of the files in `losses/`. Its `[args]` may be
+   tuned *before* the run (document why in the PR) — but the same args must be
+   used for all models.
 
 3. **Run** on a branch named `loss/<name>`:
    ```bash
    git checkout -b loss/huber
-   python loss_study/run_loss.py huber --devices 0        # all 8 models
-   python loss_study/run_loss.py huber --models convnext  # or one at a time
+   python loss_study/run_loss.py huber --models basic_unet,ipwg_net,fully_connected --devices 0   # selected models
+   python loss_study/run_loss.py huber --models ipwg_net --devices 0   # or one at a time
+   python loss_study/run_loss.py huber --devices 0                     # every model in models.toml
+   python loss_study/run_loss.py --list                                # show the model matrix
    ```
-   `--devices` is the only thing you should change between machines. Do **not**
+   `--devices` is the only thing that should change between machines. Do **not**
    edit `compute.toml`, `dataset_*.toml` or `models.toml`; if a model doesn't
    fit in memory, open an issue instead so that the batch size can be changed
    for everyone. Logs are in `loss_study/logs/`.
@@ -108,21 +109,35 @@ Runs started with `--subset` / `--max-epochs` / `--limit-batches` /
 `aggregate.py` and rejected by `validate_results.py`, so they can't pollute
 the study.
 
-## Role of the repo owner
+## Collecting and analysing results
 
-The repo owner looks after the shared parts of the study:
+* **Leaderboard:** after results are merged,
+  ```bash
+  python loss_study/aggregate.py          # -> results/summary.csv, leaderboard.md
+  ```
+  Only runs that match the current protocol (subset, epochs, optimizer
+  schedule; see below) are included. `notebooks/compare_losses.ipynb` reads `results/summary.csv`.
+* **Figures:** `plot_run.py` draws training curves, per-domain scores,
+  spectral coherence and (with `--maps`) prediction maps and pred-vs-ref
+  densities for any set of models and losses, e.g.
+  ```bash
+  python loss_study/plot_run.py --model basic_unet,ipwg_net,fully_connected --loss mse,huber --maps --devices 0
+  ```
+* **Later phases** (detection / hybrid losses): add `losses/<name>.toml` files
+  and aggregate with `--task detection` / `--task hybrid`.
 
-1. The **MSE baseline** (`run_loss.py mse`), merged before the other losses.
-2. Keeping track of which loss each contributor is running, so that no loss is run twice.
-3. Reviewing PRs: CI must be green and `loss_args` in the file attributes must match the TOML.
-4. Updating the leaderboard after each merge:
-   ```bash
-   python loss_study/aggregate.py          # -> results/summary.csv, leaderboard.md
-   git add loss_study/results && git commit -m "Update leaderboard"
-   ```
-   `notebooks/compare_losses.ipynb` reads `results/summary.csv` for figures.
-5. Later phases (detection / hybrid losses): adding `losses/<name>.toml` files
-   and aggregating with `--task detection` / `--task hybrid`.
+## Fixed protocol
+
+| setting | value | file |
+|---|---|---|
+| sensor / inputs | GMI brightness temperatures, min-max normalised, no incidence angles | `dataset_*.toml` |
+| training subset | `m` | `dataset_*.toml` |
+| geometry | gridded (CNNs), on-swath tabular (MLP) | `dataset_*.toml` |
+| optimizer / schedule | AdamW, warm-up + cosine annealing with restarts | `compute.toml` |
+| epochs | **100** | `compute.toml` |
+| precision | bf16-mixed | `compute.toml` |
+| batch size | per model, identical across losses | `models.toml` |
+| evaluation | SatRain test set, Austria / CONUS / Korea | `test.py` |
 
 ## Adding a new loss
 
@@ -133,8 +148,8 @@ with `@register_loss("name")`, add `losses/name.toml`. Multi-output losses set
 ## Design notes (why it is built this way)
 
 * **Loss is the only variable.** Architecture size, dataset subset, optimizer
-  schedule, epochs and precision are pinned in this directory and shared by
-  everyone. Batch size is per model (memory), but identical across losses.
+  schedule, epochs and precision are pinned in this directory. Batch size is
+  per model (memory), but identical across losses.
 * **Losses own their output semantics.** `Loss.n_outputs` sizes the model head,
   `Loss.predict` turns raw channels into `surface_precip` /
   `probability_of_precip`, so the SatRain evaluator scores every loss with

@@ -1,10 +1,12 @@
 # satrain_loss — loss-function comparison on the SatRain benchmark
 
 A fork of [ipwgml/satrain_models](https://github.com/ipwgml/satrain_models) in
-which every PyTorch model is trained with a **selectable loss function** and the
-losses are compared across models under one fixed recipe. The study protocol,
-runner and leaderboard live in [`loss_study/`](loss_study/README.md); start with
-[`loss_study/WALKTHROUGH.md`](loss_study/WALKTHROUGH.md) if you are a contributor.
+which the PyTorch models are trained with a **selectable loss function** and the
+losses are compared across models under one fixed recipe: seven estimation
+losses (MSE, MAE, Huber, log-cosh, weighted MSE, Tweedie, quantile), training
+subset `m`, 100 epochs. The study protocol, runner and leaderboard live in
+[`loss_study/`](loss_study/README.md); [`loss_study/WALKTHROUGH.md`](loss_study/WALKTHROUGH.md)
+walks through one complete run.
 
 The Python package keeps its upstream name `satrain_models` so that the code
 stays compatible with the reference repository.

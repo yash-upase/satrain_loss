@@ -1,11 +1,13 @@
 # Walkthrough: running one loss (example: `mae`)
 
-This is the complete, start-to-finish path for one contributor. Replace `mae`
-with your loss everywhere; nothing else changes.
+This is the complete, start-to-finish path for running one loss. Replace `mae`
+with any other loss everywhere; nothing else changes.
+
+> **Current focus.** As decided in the meeting, the analysis currently focuses on three models: `basic_unet` (U-Net), `ipwg_net` (IPWG-Net) and `fully_connected` (pixel-wise MLP). The commands below therefore select them with `--models basic_unet,ipwg_net,fully_connected`; the other models in `models.toml` can be run the same way.
 
 ```mermaid
 flowchart LR
-    A[Fork + clone] --> B[Install] --> C[5-min smoke test] --> D[Full run<br/>8 models] --> E[Validate] --> F[Commit .nc files] --> G[Pull request]
+    A[Fork + clone] --> B[Install] --> C[5-min smoke test] --> D[Full run<br/>U-Net · IPWG-Net · MLP] --> E[Validate] --> F[Commit .nc files] --> G[Pull request]
 ```
 
 
@@ -13,15 +15,21 @@ flowchart LR
 
 ## 0. What you will produce
 
-Sixteen small NetCDF files (~10 kB each), two per model:
+Six small NetCDF files (~10 kB each), two for each of the three models
+(`basic_unet`, `ipwg_net`, `fully_connected`):
 
 ```
 models/basic_unet/test_results/unet_gmi_gmi_gridded_m_mae_adamw_warmup_cosine_annealing_restarts_v00.nc
 models/basic_unet/netcdf_metrics/unet_gmi_gmi_gridded_m_mae_adamw_warmup_cosine_annealing_restarts_v00.nc
-models/encoder_decoder/test_results/encoder_decoder_…_mae_…_v00.nc
-models/encoder_decoder/netcdf_metrics/encoder_decoder_…_mae_…_v00.nc
-… (dense_encoder_decoder, efficient_net_v2, convnext, ResNet, fully_connected, ipwg_net)
+models/ipwg_net/test_results/ipwg_net_…_mae_…_v00.nc
+models/ipwg_net/netcdf_metrics/ipwg_net_…_mae_…_v00.nc
+models/fully_connected/test_results/fully_connected_…_mae_…_v00.nc
+models/fully_connected/netcdf_metrics/fully_connected_…_mae_…_v00.nc
 ```
+
+The other models (`encoder_decoder`, `dense_encoder_decoder`,
+`efficient_net_v2`, `convnext`, `ResNet`) produce the same pair of files when
+they are run.
 
 `test_results/*.nc` = scores on the Austria / CONUS / Korea test domains.
 `netcdf_metrics/*.nc` = training curves. Model weights (`models/*.pt`) stay on
@@ -73,13 +81,13 @@ description = "Mean absolute error (L1). Robust to outliers, estimates the condi
 `mae` has no arguments. For losses that do (e.g. `huber` → `delta`, `tweedie`
 → `p`, `weighted_mse` → `alpha`, `quantile` → `quantiles`) you may change the
 `[args]` **before** you start and mention in the PR — then use the same
-values for all eight models.
+values for all models.
 
 Everything else — dataset subset, optimizer schedule, epochs, precision,
 batch sizes, model sizes — is fixed in `loss_study/compute.toml`,
 `loss_study/dataset_*.toml` and `loss_study/models.toml`. **Do not edit those
-files.** If a model does not fit on your GPU, please open an issue; the batch size
-is then changed for everyone, so that all runs stay comparable.
+files.** If a model does not fit on the GPU, please open an issue; the batch size
+is then changed for every run, so that all runs stay comparable.
 
 ## 5. Smoke test (5 minutes)
 
@@ -102,10 +110,10 @@ rm -f models/basic_unet/test_results/*_xs_mae_* models/basic_unet/netcdf_metrics
 ## 6. The actual/real run
 
 ```bash
-python loss_study/run_loss.py mae --devices 0
+python loss_study/run_loss.py mae --models basic_unet,ipwg_net,fully_connected --devices 0
 ```
 
-That single command, for each of the 8 models in `loss_study/models.toml`:
+That single command, for each of the three models:
 
 1. `cd models/<model>` and runs
    `python train.py <model config> --dataset-config loss_study/dataset_*.toml --compute-config loss_study/compute.toml --loss loss_study/losses/mae.toml --batch-size <per-model> --study loss_comparison --devices 0`
@@ -114,9 +122,11 @@ That single command, for each of the 8 models in `loss_study/models.toml`:
 Useful variants:
 
 ```bash
-python loss_study/run_loss.py mae --models convnext,ResNet --devices 1    # only some models (e.g. on another GPU)
-python loss_study/run_loss.py mae --models ResNet --skip-train            # re-run evaluation only
-python loss_study/run_loss.py mae --dry-run                               # print the commands, run nothing
+python loss_study/run_loss.py mae --models ipwg_net --devices 1          # one model (e.g. on another GPU)
+python loss_study/run_loss.py mae --models ipwg_net --skip-train         # re-run evaluation only
+python loss_study/run_loss.py mae --devices 0                           # every model in models.toml
+python loss_study/run_loss.py mae --dry-run                              # print the commands, run nothing
+python loss_study/run_loss.py --list                                     # show the model matrix
 ```
 
 If a model crashes, the runner prints `TRAIN FAILED … see loss_study/logs/mae_<model>.log`,
@@ -132,7 +142,7 @@ Watch progress with `tensorboard --logdir models/<model>/lightning_logs`.
 python loss_study/validate_results.py models/*/test_results/*_mae_*.nc
 ```
 
-Expected: one `OK` line per model and `8/8 files valid.` The checker verifies
+Expected: one `OK` line per model and `3/3 files valid.` The checker verifies
 the study tag, loss name, subset `m`, the fixed optimizer approach and epoch
 count, and that all three domains have finite metrics. If something says
 `FAIL`, the line below it tells you why (typically: run made with an override
@@ -154,7 +164,7 @@ PY
 ```bash
 git status                      # should show only .nc files under models/*/test_results and models/*/netcdf_metrics
 git add models/*/test_results/*_mae_*.nc models/*/netcdf_metrics/*_mae_*.nc
-git commit -m "MAE loss results (8 models)"
+git commit -m "MAE loss results (U-Net, IPWG-Net, MLP)"
 git push -u origin loss/mae
 ```
 
@@ -164,8 +174,8 @@ file (they are git-ignored, but check `git status` anyway).
 ## 9. Open the pull request
 
 GitHub shows *"loss/mae had recent pushes — Compare & pull request"*. Target:
-`yash-upase/satrain_loss`, branch `main`. The PR template asks you to tick
-the eight models and confirm the checklist:
+`yash-upase/satrain_loss`, branch `main`. The PR template asks to tick the
+models that were run and confirm the checklist:
 
 - [x] Ran via `python loss_study/run_loss.py mae` with no override flags
 - [x] `loss_study/compute.toml`, `dataset_*.toml`, `models.toml` unchanged

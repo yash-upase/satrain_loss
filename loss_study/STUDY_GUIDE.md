@@ -1,6 +1,6 @@
 # satrain_loss — SatRain Loss-Function Comparison Study: Complete Guide
 
-*Reference: what changed relative to `satrain_models`, how the study runs, and what each contributor does.*
+*Reference: what changed relative to `satrain_models`, how the study runs, and how results are produced and collected.*
 
 ---
 
@@ -11,9 +11,9 @@
 3. [What was changed — file by file](#3-what-was-changed--file-by-file)
 4. [How it works under the hood](#4-how-it-works-under-the-hood)
 5. [The fixed experimental protocol](#5-the-fixed-experimental-protocol)
-6. [Workflow — repo owner](#6-workflow--repo-owner)
-7. [Workflow — contributors](#7-workflow--contributors)
-8. [How to join](#8-how-to-join)
+6. [Maintaining the study](#6-maintaining-the-study)
+7. [Running a loss and submitting results](#7-running-a-loss-and-submitting-results)
+8. [Study summary](#8-study-summary)
 9. [Reviewing submissions and building the leaderboard](#9-reviewing-submissions-and-building-the-leaderboard)
 10. [Phase 2 (detection) and phase 3 (hybrid)](#10-phase-2-detection-and-phase-3-hybrid)
 11. [Command reference](#11-command-reference)
@@ -43,15 +43,15 @@ flowchart LR
         L5((Weighted MSE)) --> M
         L6((Tweedie)) --> M
         L7((Quantile)) --> M
-        M["all 8 PyTorch models<br/>(same config each time)"] --> E[SatRain evaluator]
+        M["models: U-Net · IPWG-Net · MLP<br/>(same config each time)"] --> E[SatRain evaluator]
         E --> LB[(leaderboard:<br/>model × loss)]
     end
     upstream -. "same data, same evaluator,<br/>same training recipe" .-> fork
 ```
 
-Result: a **model × loss** matrix (8 × 7 = 56 runs in phase 1) scored with identical metrics, so you can answer both "which loss is best for a given model?" and "is the ranking of losses stable across models?".
+Result: a **model × loss** matrix scored with identical metrics, so you can answer both "which loss is best for a given model?" and "is the ranking of losses stable across models?".
 
-Each contributor takes **one loss** and runs it on **all 8 models**.
+> **Current focus.** As decided in the meeting, the analysis currently focuses on three models: `basic_unet` (U-Net), `ipwg_net` (IPWG-Net) and `fully_connected` (pixel-wise MLP). The commands in this guide select them with `--models basic_unet,ipwg_net,fully_connected`; the other models in `models.toml` can be run the same way. Together they span the main design choices: a plain CNN (U-Net), a deeper residual encoder–decoder (IPWG-Net) and a pixel-wise model without spatial context (MLP), giving a 3 × 7 = 21-run matrix.
 
 ---
 
@@ -284,100 +284,87 @@ The evaluator already understands `surface_precip` (regression metrics) and `pro
 
 ## 5. The fixed experimental protocol
 
-**Only the loss varies.** Everything else is pinned in `loss_study/` and shared by all contributors.
+**Only the loss varies.** Everything else is pinned in `loss_study/` and identical for every run.
 
 | Setting | Value | File |
 |---|---|---|
 | Sensor / geometry (CNNs) | GMI, gridded, spatial 256×256 tiles | `dataset_spatial.toml` |
 | Sensor / geometry (MLP) | GMI, on-swath, tabular | `dataset_tabular.toml` |
-| Training subset | **`m`** (chosen for throughput; `xl` would be ~10× longer) | both dataset TOMLs |
+| Training subset | **`m`** | both dataset TOMLs |
 | Optimiser / schedule | `adamw_warmup_cosine_annealing_restarts` (repo's tuned default LR) | `compute.toml` |
-| Epochs | `max_epochs = 40`  | `compute.toml` |
+| Epochs | **`max_epochs = 100`** | `compute.toml` |
 | Precision | `bf16-mixed` | `compute.toml` |
 | Batch size | per model (memory bound, verified on a 12 GB GPU), identical across losses | `models.toml` |
 | Model size | one per architecture | `models.toml` |
 | Evaluation | full SatRain test set, domains Austria / CONUS / Korea | `test.py` |
 
-Model matrix (`models.toml`):
+Model matrix (`models.toml`); the models currently analysed (see §1) are listed first:
 
 | model dir | config used | batch | format |
 |---|---|---|---|
-| `basic_unet` | built-in UNet | 32 | spatial |
+| `basic_unet` | built-in U-Net | 32 | spatial |
+| `ipwg_net` | `ipwg_net.toml` | 8 | spatial |
+| `fully_connected` | `model_medium.toml` (MLP 128×128×128) | 16384 | tabular |
 | `encoder_decoder` | `model_unet_medium.toml` | 16 | spatial |
 | `dense_encoder_decoder` | `model_resnext_d2.toml` | 4 | spatial |
 | `efficient_net_v2` | `model_medium.toml` (pretrained) | 32 | spatial |
 | `convnext` | `model_small.toml` (pretrained) | 32 | spatial |
 | `ResNet` | `model_medium.toml` | 4 | spatial |
-| `fully_connected` | `model_medium.toml` | 16384 | tabular |
-| `ipwg_net` | `ipwg_net.toml` | 8 | spatial |
 
 Loss list (`loss_study/losses/*.toml`):
 
-`mse` (baseline, run by the repo owner) · `mae` · `huber` · `logcosh` · `weighted_mse` · `tweedie` · `quantile`
+`mse` (baseline) · `mae` · `huber` · `logcosh` · `weighted_mse` · `tweedie` · `quantile`
 
-A run is only accepted into the leaderboard if its result files carry `study = "loss_comparison"`, `subset = "m"`, the fixed `approach`, `max_epochs` and all three domains — `validate_results.py` checks this (§9).
+A run is only accepted into the leaderboard if its result files carry `study = "loss_comparison"`, `subset = "m"`, the fixed `approach`, `max_epochs = 100` and all three domains — `validate_results.py` checks this (§9), and `aggregate.py` leaves out runs made under any other setting.
 
 ---
 
-## 6. Workflow — repo owner
+## 6. Maintaining the study
 
-The repo owner looks after the parts of the study that are shared by everyone: the fixed recipe, the MSE baseline, reviewing pull requests and the leaderboard.
+The shared parts of the study — the fixed recipe, the baseline, reviewing pull requests and the leaderboard — follow this cycle:
 
 ```mermaid
 flowchart TD
-    A[1. Publish the fork on GitHub] --> B[2. Fix max_epochs & batch sizes<br/>in loss_study/compute.toml, models.toml]
-    B --> C[3. Run the MSE baseline<br/>python loss_study/run_loss.py mse --devices 0]
-    C --> D[4. Commit baseline .nc files,<br/>run aggregate.py, commit results/]
-    D --> E[5. Open the study to contributors]
-    E --> G{PRs arrive}
-    G -->|CI green,<br/>attrs OK| H[6. Merge]
+    A[Fixed recipe in loss_study/<br/>compute.toml, dataset_*.toml, models.toml] --> C[MSE baseline<br/>python loss_study/run_loss.py mse --models basic_unet,ipwg_net,fully_connected --devices 0]
+    C --> D[Baseline .nc files committed,<br/>aggregate.py run]
+    D --> G{Pull requests with results}
+    G -->|CI green,<br/>attrs OK| H[Merge]
     G -->|CI red| I[needs fix<br/>see §9 checklist]
     I --> G
-    H --> J[7. python loss_study/aggregate.py<br/>commit results/summary.csv + leaderboard.md]
+    H --> J[python loss_study/aggregate.py<br/>results/summary.csv + leaderboard.md]
     J --> G
-    J --> K[8. Phase 1 complete:<br/>notebook figures, discussion]
-    K --> L[9. Later: add detection / hybrid loss TOMLs,<br/>repeat from 5]
+    J --> K[Analysis: plot_run.py figures,<br/>notebook, discussion]
+    K --> L[Later: detection / hybrid loss TOMLs]
 ```
 
-### Step 1 — the repository
+### The repository
 
-The study lives at `https://github.com/yash-upase/satrain_loss`, a fork of `ipwgml/satrain_models` (kept as the `upstream` remote). Branch protection on `main` (Settings → Branches: require a pull request and passing CI) is what makes `validate_results.py` a real gate.
+The study lives at `https://github.com/yash-upase/satrain_loss`, a fork of `ipwgml/satrain_models` (kept as the `upstream` remote). Branch protection on `main` (require a pull request and passing CI) is what makes `validate_results.py` a real gate.
 
-### Step 2 — the compute budget
+### The compute budget
 
-`max_epochs = 40` and the per-model batch sizes are set once, before contributor runs start:
+`max_epochs = 100`, subset `m` and the per-model batch sizes are fixed for the whole study. Changing any of them would invalidate every finished run, so a change, if ever needed, is discussed in an issue and then applies to all runs.
 
-* `loss_study/compute.toml` → `max_epochs` (the only real compute knob), estimated from the MSE baseline: time per epoch × epochs × 8 models must fit on a contributor's GPU.
-* `loss_study/models.toml` → `batch_size` per model, verified on a 12 GB GPU.
-
-These values are not changed once contributor runs have started — every finished run would become invalid. If a change is ever needed (epochs, subset, batch size), it is discussed in an issue and applies to everyone.
-
-### Step 3 — baseline
+### Baseline
 
 ```bash
 pip install -e .                                   # make sure THIS checkout is what Python imports
-python loss_study/run_loss.py mse --devices 0
+python loss_study/run_loss.py mse --models basic_unet,ipwg_net,fully_connected --devices 0
 python loss_study/validate_results.py models/*/test_results/*_mse_*.nc
 git add models/*/test_results/*_mse_*.nc models/*/netcdf_metrics/*_mse_*.nc
 git commit -m "Add MSE baseline results" && git push
 ```
 
-This proves the pipeline end-to-end on real hardware and gives the reference row before contributor runs start.
-
-### Step 5 — one loss per contributor
-
-Each contributor runs one loss, coordinated so that no loss is run twice.
-
 ---
 
-## 7. Workflow — contributors
+## 7. Running a loss and submitting results
 
 ```mermaid
 flowchart TD
     A[Fork this repo on GitHub] --> B[git clone your fork<br/>conda env, pip install satrain, pip install -e .]
     B --> C[git checkout -b loss/&lt;name&gt;]
     C --> D[Smoke test 5 min:<br/>run_loss.py &lt;name&gt; --models basic_unet --subset xs --max-epochs 1 --limit-batches 2]
-    D -->|works| E[Full run:<br/>python loss_study/run_loss.py &lt;name&gt; --devices N]
+    D -->|works| E[Full run:<br/>python loss_study/run_loss.py &lt;name&gt; --models basic_unet,ipwg_net,fully_connected --devices N]
     D -->|fails| Z[Report in an issue]
     E --> F[python loss_study/validate_results.py models/*/test_results/*_&lt;name&gt;_*.nc]
     F -->|FAIL| Z
@@ -388,7 +375,7 @@ flowchart TD
     I -->|merged| J[Done — appears in leaderboard]
 ```
 
-### Contributor commands, verbatim
+### Commands, verbatim
 
 ```bash
 # 1. get the code
@@ -398,24 +385,24 @@ conda create -n satrain_loss python=3.11 -y && conda activate satrain_loss
 pip install git+https://github.com/ipwgml/satrain
 pip install -e .
 
-# 2. branch for your loss
+# 2. branch for the loss
 git checkout -b loss/huber
 
 # 3. smoke test (few minutes; downloads the tiny 'xs' subset)
 python loss_study/run_loss.py huber --models basic_unet --subset xs --max-epochs 1 --limit-batches 2 --devices 0
 
 # 4. the real thing (downloads subset 'm' + the test set on first use)
-python loss_study/run_loss.py huber --devices 0            # all 8 models, train + test
+python loss_study/run_loss.py huber --models basic_unet,ipwg_net,fully_connected --devices 0   # train + test
 #   or model by model / resume after a crash:
-python loss_study/run_loss.py huber --models convnext,ResNet --devices 0
-python loss_study/run_loss.py huber --models convnext --skip-train   # re-run only evaluation
+python loss_study/run_loss.py huber --models ipwg_net --devices 0
+python loss_study/run_loss.py huber --models ipwg_net --skip-train    # re-run only evaluation
 
 # 5. check
 python loss_study/validate_results.py models/*/test_results/*_huber_*.nc
 
 # 6. submit
 git add models/*/test_results/*_huber_*.nc models/*/netcdf_metrics/*_huber_*.nc
-git commit -m "Huber loss results (8 models)"
+git commit -m "Huber loss results (U-Net, IPWG-Net, MLP)"
 git push -u origin loss/huber
 # → GitHub: "Compare & pull request" against yash-upase/satrain_loss
 ```
@@ -428,36 +415,35 @@ Please **avoid**:
 
 **Encouraged**:
 
-* tuning your loss's `[args]` in `loss_study/losses/<loss>.toml` **before** starting, and including that file in the PR with a short explanation;
-* implementing a *new* loss class if yours isn't in the registry (see `CONTRIBUTING.md`): subclass `Loss`, `@register_loss`, add a TOML — no model file changes.
+* tuning the loss's `[args]` in `loss_study/losses/<loss>.toml` **before** starting, and including that file in the PR with a short explanation;
+* implementing a *new* loss class if it isn't in the registry (see `CONTRIBUTING.md`): subclass `Loss`, `@register_loss`, add a TOML — no model file changes.
 
 ---
 
-## 8. How to join
+## 8. Study summary
 
 > **SatRain loss-function comparison**
 >
 > Repo: `https://github.com/yash-upase/satrain_loss` (fork of ipwgml/satrain_models).
-> Goal: train **every PyTorch model** in `models/` with **one loss each** under an identical, fixed recipe and compare losses across models.
+> Goal: train U-Net, IPWG-Net and a pixel-wise MLP with each of seven estimation losses (`mse`, `mae`, `huber`, `logcosh`, `weighted_mse`, `tweedie`, `quantile`) under an identical, fixed recipe, and compare the losses across models.
 >
 > **Steps**
-> 1. Pick a loss that nobody is running yet: `mae`, `huber`, `logcosh`, `weighted_mse`, `tweedie` or `quantile` (`mse` is the baseline, run by the repo owner), and let the others know so that each loss is run once. Or propose a new one (see `CONTRIBUTING.md`).
-> 2. Fork the repo, clone your fork, `pip install -e .`, and follow `loss_study/README.md` — the whole thing is one command: `python loss_study/run_loss.py <loss> --devices <gpu>`.
-> 3. Do the 5-minute smoke test first (`--subset xs --max-epochs 1 --limit-batches 2`) so you know your environment works.
-> 4. When all 8 models are done, run `python loss_study/validate_results.py models/*/test_results/*_<loss>_*.nc`, commit **only** the `.nc` result files, and open a pull request to this repo using the template.
+> 1. Fork the repo, clone the fork, `pip install -e .`, and follow `loss_study/README.md` — a full run is one command: `python loss_study/run_loss.py <loss> --models basic_unet,ipwg_net,fully_connected --devices <gpu>`.
+> 2. Do the 5-minute smoke test first (`--subset xs --max-epochs 1 --limit-batches 2`) to check the environment.
+> 3. When the models are done, run `python loss_study/validate_results.py models/*/test_results/*_<loss>_*.nc`, commit **only** the `.nc` result files, and open a pull request to this repo using the template.
 >
 > **Ground rules (so results are comparable)**
-> * Do not change `loss_study/compute.toml`, `dataset_*.toml`, `models.toml`. If a model doesn't fit on your GPU, or you think something should change (number of epochs, subset size, …), open an issue so that the change applies to everyone.
-> * You may tune your loss's `[args]` in `loss_study/losses/<loss>.toml` *before* you start; use the same args for all 8 models and explain the choice in the PR.
-> * Subset `m`, 40 epochs, all three test domains. Runs with overrides are rejected automatically.
+> * Do not change `loss_study/compute.toml`, `dataset_*.toml`, `models.toml`. If a model doesn't fit on the GPU, or something should change (epochs, subset size, …), open an issue so that the change applies to every run.
+> * A loss's `[args]` in `loss_study/losses/<loss>.toml` may be tuned *before* the run; the same args are used for all models and the choice is explained in the PR.
+> * Subset `m`, 100 epochs, all three test domains. Runs with overrides are rejected automatically.
 >
 > Docs: `loss_study/WALKTHROUGH.md` (step-by-step example with `mae`), `loss_study/README.md` (protocol), `CONTRIBUTING.md` (adding a loss).
 
 Good to know:
 
-* *Why the loss owns its outputs*: quantile/Tweedie/hybrid need extra channels or link functions; that logic lives in the `Loss` class, not in the model scripts — nobody needs to edit `train.py`.
+* *Why the loss owns its outputs*: quantile/Tweedie need extra channels or link functions; that logic lives in the `Loss` class, not in the model scripts — nobody needs to edit `train.py`.
 * *What a "result" is*: two small NetCDF files per model (`test_results/…nc` = scores, `netcdf_metrics/…nc` = training curves), ~10 kB each.
-* *What happens after a merge*: `aggregate.py` is re-run and the leaderboard in `loss_study/results/` is updated, so everyone sees the progress.
+* *What happens after a merge*: `aggregate.py` is re-run and the leaderboard in `loss_study/results/` is updated.
 
 ---
 
@@ -469,7 +455,7 @@ flowchart LR
     CI -->|red| R1[Ask: rerun without overrides /<br/>missing domains / wrong subset]
     CI -->|green| M[Manual checks]
     M --> M1[8 test_results + 8 netcdf_metrics<br/>files, names contain _&lt;loss&gt;_]
-    M --> M2[loss_args attr = the TOML's args<br/>identical in all 8 files]
+    M --> M2[loss_args attr = the TOML's args<br/>identical in all files]
     M --> M3[No config files changed<br/>except losses/&lt;loss&gt;.toml]
     M --> M4[Training curves look sane<br/>val_mse not NaN / exploding]
     M1 & M2 & M3 & M4 --> OK[Merge]

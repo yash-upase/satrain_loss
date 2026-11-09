@@ -44,7 +44,7 @@ note = "ConvNeXt-S encoder (pretrained) + UNet decoder"
 train_arg = "model_medium.toml"
 dataset = "spatial"
 batch_size = 4
-note = "ResNet on 64x64 tiles (tile size overridden in its train.py)"
+note = "ResNet without downsampling"
 
 [fully_connected]
 train_arg = "model_medium.toml"

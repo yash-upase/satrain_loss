@@ -295,9 +295,9 @@ class SatRainEstimationModule(L.LightningModule):
             self.val_mae.update(pred_clean, y_clean)
             self.val_corrcoef.update(pred_clean, y_clean)
 
-        # Only works for spatial format
+        # Only works for spatial format: point and y are (B, H, W)
         if point.ndim == 3:
-            self.plot_samples.update(point.unsqueeze(1), y.unsqueeze(1))
+            self.plot_samples.update(point, y)
 
         return loss
 

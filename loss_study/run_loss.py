@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-Run one loss of the loss-comparison study across all models.
+Run one loss of the loss-comparison study.
 
-For every model listed in ``models.toml`` this script runs ``train.py`` and
-then ``test.py`` inside the model directory with the fixed study configuration
-(``compute.toml``, ``dataset_<format>.toml``, ``losses/<loss>.toml``).
+For every model in ``models.toml`` (or the ones given with ``--models``) this
+script runs ``train.py`` and then ``test.py`` inside the model directory with
+the fixed study configuration (``compute.toml``, ``dataset_<format>.toml``,
+``losses/<loss>.toml``).
 
 Examples::
 
-    # Full phase-1 run for the Huber loss on GPU 1
+    # Huber loss on all models in models.toml, GPU 1
     python loss_study/run_loss.py huber --devices 1
+
+    # Selected models only
+    python loss_study/run_loss.py huber --models basic_unet,ipwg_net,fully_connected --devices 1
+
+    # Show the model matrix
+    python loss_study/run_loss.py --list
 
     # Only two models, quick smoke test on the smallest subset
     python loss_study/run_loss.py quantile --models basic_unet,fully_connected \
@@ -54,6 +61,14 @@ def load_matrix(only=None):
     return matrix
 
 
+def print_matrix():
+    with open(STUDY_DIR / "models.toml", "rb") as f:
+        matrix = tomllib.load(f)
+    print(f"{'model':24s} {'dataset':8s} {'batch':>6s}  config")
+    for name, spec in matrix.items():
+        print(f"{name:24s} {spec['dataset']:8s} {spec['batch_size']:>6d}  {spec.get('train_arg') or '-'}")
+
+
 def dataset_config(fmt: str, subset: str | None) -> Path:
     """Return the study dataset TOML, or a temporary copy with another subset."""
     base = STUDY_DIR / f"dataset_{fmt}.toml"
@@ -93,8 +108,10 @@ def run(cmd, cwd: Path, log_path: Path, dry_run: bool) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("loss", help="Loss name; loss_study/losses/<loss>.toml must exist.")
-    parser.add_argument("--models", default=None, help="Comma-separated subset of models.toml entries.")
+    parser.add_argument("loss", nargs="?", help="Loss name; loss_study/losses/<loss>.toml must exist.")
+    parser.add_argument("--models", default=None,
+                        help="Comma-separated models.toml entries. Default: all models.")
+    parser.add_argument("--list", action="store_true", help="Print the model matrix and exit.")
     parser.add_argument("--devices", default=None, help="GPU index list like '0' or '0,1', or 'cpu'.")
     parser.add_argument("--max-epochs", type=int, default=None, help="Override max_epochs (smoke tests only!).")
     parser.add_argument("--subset", default=None, help="Override dataset subset (smoke tests only!).")
@@ -107,6 +124,11 @@ def main():
     parser.add_argument("--python", default=sys.executable, help="Python interpreter to use.")
     args = parser.parse_args()
 
+    if args.list:
+        print_matrix()
+        return
+    if args.loss is None:
+        parser.error("the loss argument is required (e.g. 'mse')")
     loss_toml = STUDY_DIR / "losses" / f"{args.loss}.toml"
     if not loss_toml.exists():
         raise SystemExit(f"No loss definition found at {loss_toml}")
