@@ -264,6 +264,9 @@ class PlotSamples(tm.Metric):
     def log(
         self, lightning_module: LightningModule, output_name: Optional[str] = None
     ) -> None:
+        # Nothing to log to (e.g. Trainer(logger=False)).
+        if lightning_module.logger is None:
+            return None
         try:
             import matplotlib.pyplot as plt
             from matplotlib import colormaps
